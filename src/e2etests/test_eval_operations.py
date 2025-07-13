@@ -118,6 +118,36 @@ class TestEvalOperations:
         assert results[0]["scorer_data"][0]["score"] == 1.0
         client.delete_project(project_name=PROJECT_NAME)
 
+    def test_run_append_without_existing(
+        self, client: JudgmentClient, project_name: str
+    ):
+        """Test evaluation append behavior when the eval run does not exist."""
+        EVAL_RUN_NAME = "ColdEmailGenerator-Improve-BasePrompt"
+
+        example1 = Example(
+            input="Generate a cold outreach email for TechCorp. Facts: They recently launched an AI-powered analytics platform. Their CEO Sarah Chen previously worked at Google. They have 50+ enterprise clients.",
+            actual_output="Dear Ms. Chen,\n\nI noticed TechCorp's recent launch of your AI analytics platform and was impressed by its enterprise-focused approach. Your experience from Google clearly shines through in building scalable solutions, as evidenced by your impressive 50+ enterprise client base.\n\nWould you be open to a brief call to discuss how we could potentially collaborate?\n\nBest regards,\nAlex",
+            retrieval_context=[
+                "TechCorp launched AI analytics platform in 2024",
+                "Sarah Chen is CEO, ex-Google executive",
+                "Current client base: 50+ enterprise customers",
+            ],
+        )
+        scorer = AnswerRelevancyScorer(threshold=0.5)
+
+        results = client.run_evaluation(
+            examples=[example1],
+            scorers=[scorer],
+            model="gpt-4o-mini",
+            project_name=project_name,
+            eval_run_name=EVAL_RUN_NAME,
+            append=True,
+        )
+        assert results, f"No evaluation results found for {EVAL_RUN_NAME}"
+        assert len(results) == 1
+        print(results)
+        assert results[0].success
+
     def test_delete_eval_by_project(self, client: JudgmentClient):
         """Test delete evaluation by project and run name workflow."""
         PROJECT_NAME = "".join(

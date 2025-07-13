@@ -957,14 +957,12 @@ def run_eval(
             ]
         # Run local evals
         if local_scorers:  # List[BaseScorer]
-            results: List[ScoringResult] = safe_run_async(
-                a_execute_scoring(
-                    evaluation_run.examples,
-                    local_scorers,
-                    model=evaluation_run.model,
-                    throttle_value=0,
-                    max_concurrent=MAX_CONCURRENT_EVALUATIONS,
-                )
+            results: List[ScoringResult] = a_execute_scoring(
+                evaluation_run.examples,
+                local_scorers,
+                model=evaluation_run.model,
+                throttle_value=0,
+                max_concurrent=MAX_CONCURRENT_EVALUATIONS,
             )
             local_results = results
         # Aggregate the ScorerData from the API and local evaluations
