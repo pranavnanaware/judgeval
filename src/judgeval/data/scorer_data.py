@@ -54,7 +54,7 @@ def create_scorer_data(scorer: BaseScorer) -> List[ScorerData]:
             reason=scorer.reason,
             success=scorer.success,
             strict_mode=scorer.strict_mode,
-            evaluation_model=scorer.evaluation_model,
+            evaluation_model=scorer.model,
             error=scorer.error,
             additional_metadata=scorer.additional_metadata,
         )
@@ -68,7 +68,7 @@ def create_scorer_data(scorer: BaseScorer) -> List[ScorerData]:
                 reason=scorer.internal_scorer.reason,
                 success=scorer.internal_scorer.success,
                 strict_mode=scorer.internal_scorer.strict_mode,
-                evaluation_model=scorer.internal_scorer.evaluation_model,
+                evaluation_model=scorer.internal_scorer.model,
                 error=scorer.internal_scorer.error,
                 additional_metadata=scorer.internal_scorer.additional_metadata,
             )

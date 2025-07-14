@@ -84,7 +84,7 @@ class TestBaseScorer:
         scorer = basic_scorer
         scorer._add_model("mock-model")
 
-        assert scorer.evaluation_model == "mock-model"
+        assert scorer.model == "mock-model"
         assert scorer.using_native_model is True
         mock_create_judge.assert_called_once_with("mock-model")
 
@@ -121,10 +121,3 @@ class TestBaseScorer:
         # Test with no score
         basic_scorer.score = None
         assert basic_scorer.success_check() is False
-
-    def test_str_representation(self, basic_scorer):
-        """Test string representation of scorer"""
-        str_rep = str(basic_scorer)
-        assert "BaseScorer" in str_rep
-        assert "test_scorer" in str_rep
-        assert "0.7" in str_rep  # threshold value

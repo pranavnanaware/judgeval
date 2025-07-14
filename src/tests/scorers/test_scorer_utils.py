@@ -49,7 +49,7 @@ def test_clone_scorers(mock_scorers):
         assert type(original) is type(clone)
         assert original.score_type == clone.score_type
         assert original.threshold == clone.threshold
-        assert original.evaluation_model == clone.evaluation_model
+        assert original.model == clone.model
 
 
 def test_parse_response_json_valid():

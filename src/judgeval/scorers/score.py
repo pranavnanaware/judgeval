@@ -89,7 +89,8 @@ async def a_execute_scoring(
 
     # Add model to scorers
     for scorer in scorers:
-        scorer._add_model(model)
+        if not scorer.model:
+            scorer._add_model(model)
 
     scoring_results: List[ScoringResult] = [None for _ in examples]
     tasks = []

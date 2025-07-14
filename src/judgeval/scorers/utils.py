@@ -4,7 +4,6 @@ Util functions for Scorer objects
 
 import asyncio
 import nest_asyncio
-import inspect
 import json
 import re
 from typing import List, Optional
@@ -20,18 +19,7 @@ def clone_scorers(scorers: List[BaseScorer]) -> List[BaseScorer]:
     """
     cloned_scorers = []
     for s in scorers:
-        scorer_class = type(s)
-        args = vars(s)
-
-        signature = inspect.signature(scorer_class.__init__)
-        valid_params = signature.parameters.keys()
-        valid_args = {key: args[key] for key in valid_params if key in args}
-
-        cloned_scorer = scorer_class(**valid_args)
-        # kinda hacky, but in case the class inheriting from BaseScorer doesn't have `model` in its __init__,
-        # we need to explicitly include it here so that we can add the judge model to the cloned scorer
-        cloned_scorer._add_model(model=args.get("model"))
-        cloned_scorers.append(cloned_scorer)
+        cloned_scorers.append(s.model_copy(deep=True))
     return cloned_scorers
 
 
