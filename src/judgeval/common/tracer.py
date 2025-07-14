@@ -21,7 +21,6 @@ from contextlib import (
     AbstractAsyncContextManager,
     AbstractContextManager,
 )  # Import context manager bases
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from http import HTTPStatus
 from typing import (
@@ -51,7 +50,6 @@ from google import genai
 
 # Local application/library-specific imports
 from judgeval.constants import (
-    JUDGMENT_TRACES_ADD_ANNOTATION_API_URL,
     JUDGMENT_TRACES_UPSERT_API_URL,
     JUDGMENT_TRACES_FETCH_API_URL,
     JUDGMENT_TRACES_DELETE_API_URL,
@@ -91,24 +89,6 @@ ApiClient: TypeAlias = Union[
     genai.client.AsyncClient,
 ]  # Supported API clients
 SpanType = Literal["span", "tool", "llm", "evaluation", "chain"]
-
-
-# Temporary as a POC to have log use the existing annotations feature until log endpoints are ready
-@dataclass
-class TraceAnnotation:
-    """Represents a single annotation for a trace span."""
-
-    span_id: str
-    text: str
-    label: str
-    score: int
-
-    def to_dict(self) -> dict:
-        """Convert the annotation to a dictionary format for storage/transmission."""
-        return {
-            "span_id": self.span_id,
-            "annotation": {"text": self.text, "label": self.label, "score": self.score},
-        }
 
 
 class TraceManagerClient:
@@ -224,33 +204,6 @@ class TraceManagerClient:
 
         return server_response
 
-    ## TODO: Should have a log endpoint, endpoint should also support batched payloads
-    def save_annotation(self, annotation: TraceAnnotation):
-        json_data = {
-            "span_id": annotation.span_id,
-            "annotation": {
-                "text": annotation.text,
-                "label": annotation.label,
-                "score": annotation.score,
-            },
-        }
-
-        response = requests.post(
-            JUDGMENT_TRACES_ADD_ANNOTATION_API_URL,
-            json=json_data,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.judgment_api_key}",
-                "X-Organization-Id": self.organization_id,
-            },
-            verify=True,
-        )
-
-        if response.status_code != HTTPStatus.OK:
-            raise ValueError(f"Failed to save annotation: {response.text}")
-
-        return response.json()
-
     def delete_trace(self, trace_id: str):
         """
         Delete a trace from the database.
@@ -345,7 +298,6 @@ class TraceClient:
         self.trace_spans: List[TraceSpan] = []
         self.span_id_to_span: Dict[str, TraceSpan] = {}
         self.evaluation_runs: List[EvaluationRun] = []
-        self.annotations: List[TraceAnnotation] = []
         self.start_time: Optional[float] = (
             None  # Will be set after first successful save
         )
@@ -536,11 +488,6 @@ class TraceClient:
             span.has_evaluation = True  # Set the has_evaluation flag
         self.evaluation_runs.append(eval_run)
 
-    def add_annotation(self, annotation: TraceAnnotation):
-        """Add an annotation to this trace context"""
-        self.annotations.append(annotation)
-        return self
-
     def record_input(self, inputs: dict):
         current_span_id = self.get_current_span()
         if current_span_id:
@@ -727,10 +674,6 @@ class TraceClient:
 
         self.update_id += 1
 
-        # Upload annotations
-        # TODO: batch to the log endpoint
-        for annotation in self.annotations:
-            self.trace_manager_client.save_annotation(annotation)
         return self.trace_id, server_response
 
     def delete(self):
@@ -1488,18 +1431,6 @@ class _DeepTracer:
                 self._original_threading_trace = None
 
 
-# Below commented out function isn't used anymore?
-
-# def log(self, message: str, level: str = "info"):
-#         """ Log a message with the span context """
-#         current_trace = self._tracer.get_current_trace()
-#         if current_trace:
-#             current_trace.log(message, level)
-#         else:
-#             print(f"[{level}] {message}")
-#         current_trace.record_output({"log": message})
-
-
 class Tracer:
     # Tracer.current_trace class variable is currently used in wrap()
     # TODO: Keep track of cross-context state for current trace and current span ID solely through class variables instead of instance variables?
@@ -1737,18 +1668,6 @@ class Tracer:
             finally:
                 # Reset the context variable
                 self.reset_current_trace(token)
-
-    def log(self, msg: str, label: str = "log", score: int = 1):
-        """Log a message with the current span context"""
-        current_span_id = self.get_current_span()
-        current_trace = self.get_current_trace()
-        if current_span_id and current_trace:
-            annotation = TraceAnnotation(
-                span_id=current_span_id, text=msg, label=label, score=score
-            )
-            current_trace.add_annotation(annotation)
-
-        rprint(f"[bold]{label}:[/bold] {msg}")
 
     def identify(
         self,
