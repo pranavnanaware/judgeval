@@ -92,10 +92,10 @@ def validate_trace_token_counts(
         if span.span_type == "llm" and span.function in llm_span_names:
             usage = span.usage
             if usage and "info" not in usage:  # Check if it's actual usage data
-                manual_prompt_tokens += usage.prompt_tokens
-                manual_completion_tokens += usage.completion_tokens
-                manual_total_tokens += usage.total_tokens
-                manual_cached_input_tokens += usage.cache_read_input_tokens
+                manual_prompt_tokens += usage.prompt_tokens or 0
+                manual_completion_tokens += usage.completion_tokens or 0
+                manual_total_tokens += usage.total_tokens or 0
+                manual_cached_input_tokens += usage.cache_read_input_tokens or 0
 
     assert manual_prompt_tokens > 0, "Prompt tokens should be counted"
     assert manual_completion_tokens > 0, "Completion tokens should be counted"
