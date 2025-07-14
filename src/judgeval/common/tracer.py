@@ -18,8 +18,6 @@ import sys
 import json
 from contextlib import (
     contextmanager,
-    AbstractAsyncContextManager,
-    AbstractContextManager,
 )  # Import context manager bases
 from datetime import datetime, timezone
 from http import HTTPStatus
@@ -33,7 +31,6 @@ from typing import (
     Optional,
     Tuple,
     Union,
-    AsyncGenerator,
     TypeAlias,
 )
 from rich import print as rprint
@@ -44,6 +41,9 @@ from requests import RequestException
 from judgeval.utils.requests import requests
 from litellm import cost_per_token as _original_cost_per_token
 from openai import OpenAI, AsyncOpenAI
+from openai.types.chat.chat_completion import ChatCompletion
+from openai.types.responses.response import Response
+from openai.types.chat import ParsedChatCompletion
 from together import Together, AsyncTogether
 from anthropic import Anthropic, AsyncAnthropic
 from google import genai
@@ -64,8 +64,6 @@ from judgeval.common.utils import ExcInfo, validate_api_key
 from judgeval.common.logger import judgeval_logger
 
 # Standard library imports needed for the new class
-import concurrent.futures
-from collections.abc import Iterator, AsyncIterator  # Add Iterator and AsyncIterator
 import queue
 import atexit
 
@@ -2258,236 +2256,81 @@ def wrap(
         original_beta_parse,
     ) = _get_client_config(client)
 
-    def _record_input_and_check_streaming(span, kwargs, is_responses=False):
-        """Record input and check for streaming"""
-        is_streaming = kwargs.get("stream", False)
-
-        # Record input based on whether this is a responses endpoint
-        if is_responses:
-            span.record_input(kwargs)
-        else:
-            input_data = _format_input_data(client, **kwargs)
-            span.record_input(input_data)
-
-        # Warn about token counting limitations with streaming
-        if isinstance(client, (AsyncOpenAI, OpenAI)) and is_streaming:
-            if not kwargs.get("stream_options", {}).get("include_usage"):
-                judgeval_logger.warning(
-                    "OpenAI streaming calls don't include token counts by default. "
-                    "To enable token counting with streams, set stream_options={'include_usage': True} "
-                    "in your API call arguments.",
-                    UserWarning,
-                )
-
-        return is_streaming
-
-    def _format_and_record_output(span, response, is_streaming, is_async, is_responses):
+    def process_span(span, response):
         """Format and record the output in the span"""
-        if is_streaming:
-            output_entry = span.record_output("<pending stream>")
-            wrapper_func = _async_stream_wrapper if is_async else _sync_stream_wrapper
-            return wrapper_func(
-                response, client, output_entry, trace_across_async_contexts
-            )
-        else:
-            format_func = (
-                _format_response_output_data if is_responses else _format_output_data
-            )
-            output, usage = format_func(client, response)
-            span.record_output(output)
-            span.record_usage(usage)
+        output, usage = _format_output_data(client, response)
+        span.record_output(output)
+        span.record_usage(usage)
 
-            # Queue the completed LLM span now that it has all data (input, output, usage)
+        # Queue the completed LLM span now that it has all data (input, output, usage)
+        current_trace = _get_current_trace(trace_across_async_contexts)
+        if current_trace and current_trace.background_span_service:
+            # Get the current span from the trace client
+            current_span_id = current_trace.get_current_span()
+            if current_span_id and current_span_id in current_trace.span_id_to_span:
+                completed_span = current_trace.span_id_to_span[current_span_id]
+                current_trace.background_span_service.queue_span(
+                    completed_span, span_state="completed"
+                )
+
+        return response
+
+    def wrapped(function):
+        def wrapper(*args, **kwargs):
             current_trace = _get_current_trace(trace_across_async_contexts)
-            if current_trace and current_trace.background_span_service:
-                # Get the current span from the trace client
-                current_span_id = current_trace.get_current_span()
-                if current_span_id and current_span_id in current_trace.span_id_to_span:
-                    completed_span = current_trace.span_id_to_span[current_span_id]
-                    current_trace.background_span_service.queue_span(
-                        completed_span, span_state="completed"
-                    )
+            if not current_trace:
+                return function(*args, **kwargs)
 
-            return response
+            with current_trace.span(span_name, span_type="llm") as span:
+                span.record_input(kwargs)
 
-    # --- Traced Async Functions ---
-    async def traced_create_async(*args, **kwargs):
-        current_trace = _get_current_trace(trace_across_async_contexts)
-        if not current_trace:
-            return await original_create(*args, **kwargs)
+                try:
+                    response = function(*args, **kwargs)
+                    return process_span(span, response)
+                except Exception as e:
+                    _capture_exception_for_trace(span, sys.exc_info())
+                    raise e
 
-        with current_trace.span(span_name, span_type="llm") as span:
-            is_streaming = _record_input_and_check_streaming(span, kwargs)
+        return wrapper
 
-            try:
-                response_or_iterator = await original_create(*args, **kwargs)
-                return _format_and_record_output(
-                    span, response_or_iterator, is_streaming, True, False
-                )
-            except Exception as e:
-                _capture_exception_for_trace(span, sys.exc_info())
-                raise e
+    def wrapped_async(function):
+        async def wrapper(*args, **kwargs):
+            current_trace = _get_current_trace(trace_across_async_contexts)
+            if not current_trace:
+                return await function(*args, **kwargs)
 
-    async def traced_beta_parse_async(*args, **kwargs):
-        current_trace = _get_current_trace(trace_across_async_contexts)
-        if not current_trace:
-            return await original_beta_parse(*args, **kwargs)
+            with current_trace.span(span_name, span_type="llm") as span:
+                span.record_input(kwargs)
 
-        with current_trace.span(span_name, span_type="llm") as span:
-            is_streaming = _record_input_and_check_streaming(span, kwargs)
+                try:
+                    response = await function(*args, **kwargs)
+                    return process_span(span, response)
+                except Exception as e:
+                    _capture_exception_for_trace(span, sys.exc_info())
+                    raise e
 
-            try:
-                response_or_iterator = await original_beta_parse(*args, **kwargs)
-                return _format_and_record_output(
-                    span, response_or_iterator, is_streaming, True, False
-                )
-            except Exception as e:
-                _capture_exception_for_trace(span, sys.exc_info())
-                raise e
+        return wrapper
 
-    # Async responses for OpenAI clients
-    async def traced_response_create_async(*args, **kwargs):
-        current_trace = _get_current_trace(trace_across_async_contexts)
-        if not current_trace:
-            return await original_responses_create(*args, **kwargs)
-
-        with current_trace.span(span_name, span_type="llm") as span:
-            is_streaming = _record_input_and_check_streaming(
-                span, kwargs, is_responses=True
-            )
-
-            try:
-                response_or_iterator = await original_responses_create(*args, **kwargs)
-                return _format_and_record_output(
-                    span, response_or_iterator, is_streaming, True, True
-                )
-            except Exception as e:
-                _capture_exception_for_trace(span, sys.exc_info())
-                raise e
-
-    # Function replacing .stream() for async clients
-    def traced_stream_async(*args, **kwargs):
-        current_trace = _get_current_trace(trace_across_async_contexts)
-        if not current_trace or not original_stream:
-            return original_stream(*args, **kwargs)
-
-        original_manager = original_stream(*args, **kwargs)
-        return _TracedAsyncStreamManagerWrapper(
-            original_manager=original_manager,
-            client=client,
-            span_name=span_name,
-            trace_client=current_trace,
-            stream_wrapper_func=_async_stream_wrapper,
-            input_kwargs=kwargs,
-            trace_across_async_contexts=trace_across_async_contexts,
-        )
-
-    # --- Traced Sync Functions ---
-    def traced_create_sync(*args, **kwargs):
-        current_trace = _get_current_trace(trace_across_async_contexts)
-        if not current_trace:
-            return original_create(*args, **kwargs)
-
-        with current_trace.span(span_name, span_type="llm") as span:
-            is_streaming = _record_input_and_check_streaming(span, kwargs)
-
-            try:
-                response_or_iterator = original_create(*args, **kwargs)
-                return _format_and_record_output(
-                    span, response_or_iterator, is_streaming, False, False
-                )
-            except Exception as e:
-                _capture_exception_for_trace(span, sys.exc_info())
-                raise e
-
-    def traced_beta_parse_sync(*args, **kwargs):
-        current_trace = _get_current_trace(trace_across_async_contexts)
-        if not current_trace:
-            return original_beta_parse(*args, **kwargs)
-
-        with current_trace.span(span_name, span_type="llm") as span:
-            is_streaming = _record_input_and_check_streaming(span, kwargs)
-
-            try:
-                response_or_iterator = original_beta_parse(*args, **kwargs)
-                return _format_and_record_output(
-                    span, response_or_iterator, is_streaming, False, False
-                )
-            except Exception as e:
-                _capture_exception_for_trace(span, sys.exc_info())
-                raise e
-
-    def traced_response_create_sync(*args, **kwargs):
-        current_trace = _get_current_trace(trace_across_async_contexts)
-        if not current_trace:
-            return original_responses_create(*args, **kwargs)
-
-        with current_trace.span(span_name, span_type="llm") as span:
-            is_streaming = _record_input_and_check_streaming(
-                span, kwargs, is_responses=True
-            )
-
-            try:
-                response_or_iterator = original_responses_create(*args, **kwargs)
-                return _format_and_record_output(
-                    span, response_or_iterator, is_streaming, False, True
-                )
-            except Exception as e:
-                _capture_exception_for_trace(span, sys.exc_info())
-                raise e
-
-    # Function replacing sync .stream()
-    def traced_stream_sync(*args, **kwargs):
-        current_trace = _get_current_trace(trace_across_async_contexts)
-        if not current_trace or not original_stream:
-            return original_stream(*args, **kwargs)
-
-        original_manager = original_stream(*args, **kwargs)
-        return _TracedSyncStreamManagerWrapper(
-            original_manager=original_manager,
-            client=client,
-            span_name=span_name,
-            trace_client=current_trace,
-            stream_wrapper_func=_sync_stream_wrapper,
-            input_kwargs=kwargs,
-            trace_across_async_contexts=trace_across_async_contexts,
-        )
-
-    # --- Assign Traced Methods to Client Instance ---
-    if isinstance(client, (AsyncOpenAI, AsyncTogether)):
-        client.chat.completions.create = traced_create_async
-        if hasattr(client, "responses") and hasattr(client.responses, "create"):
-            client.responses.create = traced_response_create_async
-        if (
-            hasattr(client, "beta")
-            and hasattr(client.beta, "chat")
-            and hasattr(client.beta.chat, "completions")
-            and hasattr(client.beta.chat.completions, "parse")
-        ):
-            client.beta.chat.completions.parse = traced_beta_parse_async
-    elif isinstance(client, AsyncAnthropic):
-        client.messages.create = traced_create_async
-        if original_stream:
-            client.messages.stream = traced_stream_async
-    elif isinstance(client, genai.client.AsyncClient):
-        client.models.generate_content = traced_create_async
-    elif isinstance(client, (OpenAI, Together)):
-        client.chat.completions.create = traced_create_sync
-        if hasattr(client, "responses") and hasattr(client.responses, "create"):
-            client.responses.create = traced_response_create_sync
-        if (
-            hasattr(client, "beta")
-            and hasattr(client.beta, "chat")
-            and hasattr(client.beta.chat, "completions")
-            and hasattr(client.beta.chat.completions, "parse")
-        ):
-            client.beta.chat.completions.parse = traced_beta_parse_sync
-    elif isinstance(client, Anthropic):
-        client.messages.create = traced_create_sync
-        if original_stream:
-            client.messages.stream = traced_stream_sync
-    elif isinstance(client, genai.Client):
-        client.models.generate_content = traced_create_sync
+    if isinstance(client, (OpenAI)):
+        client.chat.completions.create = wrapped(original_create)
+        client.responses.create = wrapped(original_responses_create)
+        client.beta.chat.completions.parse = wrapped(original_beta_parse)
+    elif isinstance(client, (AsyncOpenAI)):
+        client.chat.completions.create = wrapped_async(original_create)
+        client.responses.create = wrapped_async(original_responses_create)
+        client.beta.chat.completions.parse = wrapped_async(original_beta_parse)
+    elif isinstance(client, (Together)):
+        client.chat.completions.create = wrapped(original_create)
+    elif isinstance(client, (AsyncTogether)):
+        client.chat.completions.create = wrapped_async(original_create)
+    elif isinstance(client, (Anthropic)):
+        client.messages.create = wrapped(original_create)
+    elif isinstance(client, (AsyncAnthropic)):
+        client.messages.create = wrapped_async(original_create)
+    elif isinstance(client, (genai.Client)):
+        client.models.generate_content = wrapped(original_create)
+    elif isinstance(client, (genai.client.AsyncClient)):
+        client.models.generate_content = wrapped_async(original_create)
 
     return client
 
@@ -2537,77 +2380,6 @@ def _get_client_config(
     raise ValueError(f"Unsupported client type: {type(client)}")
 
 
-def _format_input_data(client: ApiClient, **kwargs) -> dict:
-    """Format input parameters based on client type.
-
-    Extracts relevant parameters from kwargs based on the client type
-    to ensure consistent tracing across different APIs.
-    """
-    if isinstance(client, (OpenAI, Together, AsyncOpenAI, AsyncTogether)):
-        input_data = {
-            "model": kwargs.get("model"),
-            "messages": kwargs.get("messages"),
-        }
-        if kwargs.get("response_format"):
-            input_data["response_format"] = kwargs.get("response_format")
-        return input_data
-    elif isinstance(client, (genai.Client, genai.client.AsyncClient)):
-        return {"model": kwargs.get("model"), "contents": kwargs.get("contents")}
-    # Anthropic requires additional max_tokens parameter
-    return {
-        "model": kwargs.get("model"),
-        "messages": kwargs.get("messages"),
-        "max_tokens": kwargs.get("max_tokens"),
-    }
-
-
-def _format_response_output_data(client: ApiClient, response: Any) -> tuple:
-    """Format API response data based on client type.
-
-    Normalizes different response formats into a consistent structure
-    for tracing purposes.
-    """
-    message_content = None
-    prompt_tokens = 0
-    completion_tokens = 0
-    model_name = None
-    cache_read_input_tokens = 0
-    cache_creation_input_tokens = 0
-
-    if isinstance(client, (OpenAI, AsyncOpenAI)):
-        model_name = response.model
-        prompt_tokens = response.usage.input_tokens
-        completion_tokens = response.usage.output_tokens
-        cache_read_input_tokens = response.usage.input_tokens_details.cached_tokens
-        message_content = "".join(seg.text for seg in response.output[0].content)
-    else:
-        judgeval_logger.warning(f"Unsupported client type: {type(client)}")
-        return None, None
-
-    prompt_cost, completion_cost = cost_per_token(
-        model=model_name,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        cache_read_input_tokens=cache_read_input_tokens,
-        cache_creation_input_tokens=cache_creation_input_tokens,
-    )
-    total_cost_usd = (
-        (prompt_cost + completion_cost) if prompt_cost and completion_cost else None
-    )
-    usage = TraceUsage(
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        total_tokens=prompt_tokens + completion_tokens,
-        cache_read_input_tokens=cache_read_input_tokens,
-        cache_creation_input_tokens=cache_creation_input_tokens,
-        prompt_tokens_cost_usd=prompt_cost,
-        completion_tokens_cost_usd=completion_cost,
-        total_cost_usd=total_cost_usd,
-        model_name=model_name,
-    )
-    return message_content, usage
-
-
 def _format_output_data(
     client: ApiClient, response: Any
 ) -> tuple[Optional[str], Optional[TraceUsage]]:
@@ -2629,34 +2401,39 @@ def _format_output_data(
     message_content = None
 
     if isinstance(client, (OpenAI, AsyncOpenAI)):
-        model_name = response.model
-        prompt_tokens = response.usage.prompt_tokens
-        completion_tokens = response.usage.completion_tokens
-        cache_read_input_tokens = response.usage.prompt_tokens_details.cached_tokens
-        if (
-            hasattr(response.choices[0].message, "parsed")
-            and response.choices[0].message.parsed
-        ):
-            message_content = response.choices[0].message.parsed
-        else:
-            message_content = response.choices[0].message.content
+        if isinstance(response, ChatCompletion):
+            model_name = response.model
+            prompt_tokens = response.usage.prompt_tokens
+            completion_tokens = response.usage.completion_tokens
+            cache_read_input_tokens = response.usage.prompt_tokens_details.cached_tokens
 
+            if isinstance(response, ParsedChatCompletion):
+                message_content = response.choices[0].message.parsed
+            else:
+                message_content = response.choices[0].message.content
+        elif isinstance(response, Response):
+            model_name = response.model
+            prompt_tokens = response.usage.input_tokens
+            completion_tokens = response.usage.output_tokens
+            cache_read_input_tokens = response.usage.input_tokens_details.cached_tokens
+            message_content = "".join(seg.text for seg in response.output[0].content)
+
+        # Note: LiteLLM seems to use cache_read_input_tokens to calculate the cost for OpenAI
     elif isinstance(client, (Together, AsyncTogether)):
         model_name = "together_ai/" + response.model
         prompt_tokens = response.usage.prompt_tokens
         completion_tokens = response.usage.completion_tokens
-        if (
-            hasattr(response.choices[0].message, "parsed")
-            and response.choices[0].message.parsed
-        ):
-            message_content = response.choices[0].message.parsed
-        else:
-            message_content = response.choices[0].message.content
+        message_content = response.choices[0].message.content
+
+        # As of 2025-07-14, Together does not do any input cache token tracking
     elif isinstance(client, (genai.Client, genai.client.AsyncClient)):
         model_name = response.model_version
         prompt_tokens = response.usage_metadata.prompt_token_count
         completion_tokens = response.usage_metadata.candidates_token_count
         message_content = response.candidates[0].content.parts[0].text
+
+        if hasattr(response.usage_metadata, "cached_content_token_count"):
+            cache_read_input_tokens = response.usage_metadata.cached_content_token_count
     elif isinstance(client, (Anthropic, AsyncAnthropic)):
         model_name = response.model
         prompt_tokens = response.usage.input_tokens
@@ -2742,280 +2519,6 @@ _TRACE_FILEPATH_BLOCKLIST = tuple(
 )
 
 
-# Add the new TraceThreadPoolExecutor class
-class TraceThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
-    """
-    A ThreadPoolExecutor subclass that automatically propagates contextvars
-    from the submitting thread to the worker thread using copy_context().run().
-
-    This ensures that context variables like `current_trace_var` and
-    `current_span_var` are available within functions executed by the pool,
-    allowing the Tracer to maintain correct parent-child relationships across
-    thread boundaries.
-    """
-
-    def submit(self, fn, /, *args, **kwargs):
-        """
-        Submit a callable to be executed with the captured context.
-        """
-        # Capture context from the submitting thread
-        ctx = contextvars.copy_context()
-
-        # We use functools.partial to bind the arguments to the function *now*,
-        # as ctx.run doesn't directly accept *args, **kwargs in the same way
-        # submit does. It expects ctx.run(callable, arg1, arg2...).
-        func_with_bound_args = functools.partial(fn, *args, **kwargs)
-
-        # Submit the ctx.run callable to the original executor.
-        # ctx.run will execute the (now argument-bound) function within the
-        # captured context in the worker thread.
-        return super().submit(ctx.run, func_with_bound_args)
-
-    # Note: The `map` method would also need to be overridden for full context
-    # propagation if users rely on it, but `submit` is the most common use case.
-
-
-# Helper functions for stream processing
-# ---------------------------------------
-
-
-def _extract_content_from_chunk(client: ApiClient, chunk: Any) -> Optional[str]:
-    """Extracts the text content from a stream chunk based on the client type."""
-    try:
-        if isinstance(client, (OpenAI, Together, AsyncOpenAI, AsyncTogether)):
-            return chunk.choices[0].delta.content
-        elif isinstance(client, (Anthropic, AsyncAnthropic)):
-            # Anthropic streams various event types, we only care for content blocks
-            if chunk.type == "content_block_delta":
-                return chunk.delta.text
-        elif isinstance(client, (genai.Client, genai.client.AsyncClient)):
-            # Google streams Candidate objects
-            if (
-                chunk.candidates
-                and chunk.candidates[0].content
-                and chunk.candidates[0].content.parts
-            ):
-                return chunk.candidates[0].content.parts[0].text
-    except (AttributeError, IndexError, KeyError):
-        # Handle cases where chunk structure is unexpected or doesn't contain content
-        pass  # Return None
-    return None
-
-
-def _extract_usage_from_final_chunk(
-    client: ApiClient, chunk: Any
-) -> Optional[Dict[str, int]]:
-    """Extracts usage data if present in the *final* chunk (client-specific)."""
-    try:
-        # OpenAI/Together include usage in the *last* chunk's `usage` attribute if available
-        # This typically requires specific API versions or settings. Often usage is *not* streamed.
-        if isinstance(client, (OpenAI, Together, AsyncOpenAI, AsyncTogether)):
-            # Check if usage is directly on the chunk (some models might do this)
-            if hasattr(chunk, "usage") and chunk.usage:
-                prompt_tokens = chunk.usage.prompt_tokens
-                completion_tokens = chunk.usage.completion_tokens
-            # Check if usage is nested within choices (less common for final chunk, but check)
-            elif (
-                chunk.choices
-                and hasattr(chunk.choices[0], "usage")
-                and chunk.choices[0].usage
-            ):
-                prompt_tokens = chunk.choices[0].usage.prompt_tokens
-                completion_tokens = chunk.choices[0].usage.completion_tokens
-
-            if isinstance(client, (Together, AsyncTogether)):
-                model_name = "together_ai/" + chunk.model
-
-            prompt_cost, completion_cost = cost_per_token(
-                model=model_name,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-            )
-            total_cost_usd = (
-                (prompt_cost + completion_cost)
-                if prompt_cost and completion_cost
-                else None
-            )
-            return TraceUsage(
-                prompt_tokens=chunk.usage.prompt_tokens,
-                completion_tokens=chunk.usage.completion_tokens,
-                total_tokens=chunk.usage.total_tokens,
-                prompt_tokens_cost_usd=prompt_cost,
-                completion_tokens_cost_usd=completion_cost,
-                total_cost_usd=total_cost_usd,
-                model_name=chunk.model,
-            )
-        # Anthropic includes usage in the 'message_stop' event type
-        elif isinstance(client, (Anthropic, AsyncAnthropic)):
-            if chunk.type == "message_stop":
-                # Anthropic final usage is often attached to the *message* object, not the chunk directly
-                # The API might provide a way to get the final message object, but typically not in the stream itself.
-                # Let's assume for now usage might appear in the final *chunk* metadata if supported.
-                # This is a placeholder - Anthropic usage typically needs a separate call or context.
-                pass
-        elif isinstance(client, (genai.Client, genai.client.AsyncClient)):
-            # Google provides usage metadata on the full response object, not typically streamed per chunk.
-            # It might be in the *last* chunk's usage_metadata if the stream implementation supports it.
-            if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
-                return {
-                    "prompt_tokens": chunk.usage_metadata.prompt_token_count,
-                    "completion_tokens": chunk.usage_metadata.candidates_token_count,
-                    "total_tokens": chunk.usage_metadata.total_token_count,
-                }
-
-    except (AttributeError, IndexError, KeyError, TypeError):
-        # Handle cases where usage data is missing or malformed
-        pass  # Return None
-    return None
-
-
-# --- Sync Stream Wrapper ---
-def _sync_stream_wrapper(
-    original_stream: Iterator,
-    client: ApiClient,
-    span: TraceSpan,
-    trace_across_async_contexts: bool = Tracer.trace_across_async_contexts,
-) -> Generator[Any, None, None]:
-    """Wraps a synchronous stream iterator to capture content and update the trace."""
-    content_parts = []  # Use a list instead of string concatenation
-    final_usage = None
-    last_chunk = None
-    try:
-        for chunk in original_stream:
-            content_part = _extract_content_from_chunk(client, chunk)
-            if content_part:
-                content_parts.append(
-                    content_part
-                )  # Append to list instead of concatenating
-            last_chunk = chunk  # Keep track of the last chunk for potential usage data
-            yield chunk  # Pass the chunk to the caller
-    finally:
-        # Attempt to extract usage from the last chunk received
-        if last_chunk:
-            final_usage = _extract_usage_from_final_chunk(client, last_chunk)
-
-        # Update the trace entry with the accumulated content and usage
-        span.output = "".join(content_parts)
-        span.usage = final_usage
-
-        # Queue the completed LLM span now that streaming is done and all data is available
-
-        current_trace = _get_current_trace(trace_across_async_contexts)
-        if current_trace and current_trace.background_span_service:
-            current_trace.background_span_service.queue_span(
-                span, span_state="completed"
-            )
-
-        # Note: We might need to adjust _serialize_output if this dict causes issues,
-        # but Pydantic's model_dump should handle dicts.
-
-
-# --- Async Stream Wrapper ---
-async def _async_stream_wrapper(
-    original_stream: AsyncIterator,
-    client: ApiClient,
-    span: TraceSpan,
-    trace_across_async_contexts: bool = Tracer.trace_across_async_contexts,
-) -> AsyncGenerator[Any, None]:
-    # [Existing logic - unchanged]
-    content_parts = []  # Use a list instead of string concatenation
-    final_usage_data = None
-    last_content_chunk = None
-    anthropic_input_tokens = 0
-    anthropic_output_tokens = 0
-
-    try:
-        model_name = ""
-        async for chunk in original_stream:
-            # Check for OpenAI's final usage chunk
-            if (
-                isinstance(client, (AsyncOpenAI, OpenAI))
-                and hasattr(chunk, "usage")
-                and chunk.usage is not None
-            ):
-                final_usage_data = {
-                    "prompt_tokens": chunk.usage.prompt_tokens,
-                    "completion_tokens": chunk.usage.completion_tokens,
-                    "total_tokens": chunk.usage.total_tokens,
-                }
-                model_name = chunk.model
-                yield chunk
-                continue
-
-            if isinstance(client, (AsyncAnthropic, Anthropic)) and hasattr(
-                chunk, "type"
-            ):
-                if chunk.type == "message_start":
-                    if (
-                        hasattr(chunk, "message")
-                        and hasattr(chunk.message, "usage")
-                        and hasattr(chunk.message.usage, "input_tokens")
-                    ):
-                        anthropic_input_tokens = chunk.message.usage.input_tokens
-                        model_name = chunk.message.model
-                elif chunk.type == "message_delta":
-                    if hasattr(chunk, "usage") and hasattr(
-                        chunk.usage, "output_tokens"
-                    ):
-                        anthropic_output_tokens = chunk.usage.output_tokens
-
-            content_part = _extract_content_from_chunk(client, chunk)
-            if content_part:
-                content_parts.append(
-                    content_part
-                )  # Append to list instead of concatenating
-                last_content_chunk = chunk
-
-            yield chunk
-    finally:
-        anthropic_final_usage = None
-        if isinstance(client, (AsyncAnthropic, Anthropic)) and (
-            anthropic_input_tokens > 0 or anthropic_output_tokens > 0
-        ):
-            anthropic_final_usage = {
-                "prompt_tokens": anthropic_input_tokens,
-                "completion_tokens": anthropic_output_tokens,
-                "total_tokens": anthropic_input_tokens + anthropic_output_tokens,
-            }
-
-        usage_info = None
-        if final_usage_data:
-            usage_info = final_usage_data
-        elif anthropic_final_usage:
-            usage_info = anthropic_final_usage
-        elif last_content_chunk:
-            usage_info = _extract_usage_from_final_chunk(client, last_content_chunk)
-
-        if usage_info and not isinstance(usage_info, TraceUsage):
-            prompt_cost, completion_cost = cost_per_token(
-                model=model_name,
-                prompt_tokens=usage_info["prompt_tokens"],
-                completion_tokens=usage_info["completion_tokens"],
-            )
-            usage_info = TraceUsage(
-                prompt_tokens=usage_info["prompt_tokens"],
-                completion_tokens=usage_info["completion_tokens"],
-                total_tokens=usage_info["total_tokens"],
-                prompt_tokens_cost_usd=prompt_cost,
-                completion_tokens_cost_usd=completion_cost,
-                total_cost_usd=prompt_cost + completion_cost,
-                model_name=model_name,
-            )
-        if span and hasattr(span, "output"):
-            span.output = "".join(content_parts)
-            span.usage = usage_info
-            start_ts = getattr(span, "created_at", time.time())
-            span.duration = time.time() - start_ts
-
-            # Queue the completed LLM span now that async streaming is done and all data is available
-            current_trace = _get_current_trace(trace_across_async_contexts)
-            if current_trace and current_trace.background_span_service:
-                current_trace.background_span_service.queue_span(
-                    span, span_state="completed"
-                )
-        # else: # Handle error case if necessary, but remove debug print
-
-
 def cost_per_token(*args, **kwargs):
     try:
         prompt_tokens_cost_usd_dollar, completion_tokens_cost_usd_dollar = (
@@ -3030,114 +2533,6 @@ def cost_per_token(*args, **kwargs):
     except Exception as e:
         judgeval_logger.warning(f"Error calculating cost per token: {e}")
         return None, None
-
-
-class _BaseStreamManagerWrapper:
-    def __init__(
-        self,
-        original_manager,
-        client,
-        span_name,
-        trace_client,
-        stream_wrapper_func,
-        input_kwargs,
-        trace_across_async_contexts: bool = Tracer.trace_across_async_contexts,
-    ):
-        self._original_manager = original_manager
-        self._client = client
-        self._span_name = span_name
-        self._trace_client = trace_client
-        self._stream_wrapper_func = stream_wrapper_func
-        self._input_kwargs = input_kwargs
-        self._parent_span_id_at_entry = None
-        self._trace_across_async_contexts = trace_across_async_contexts
-
-    def _create_span(self):
-        start_time = time.time()
-        span_id = str(uuid.uuid4())
-        current_depth = 0
-        if (
-            self._parent_span_id_at_entry
-            and self._parent_span_id_at_entry in self._trace_client._span_depths
-        ):
-            current_depth = (
-                self._trace_client._span_depths[self._parent_span_id_at_entry] + 1
-            )
-        self._trace_client._span_depths[span_id] = current_depth
-        span = TraceSpan(
-            function=self._span_name,
-            span_id=span_id,
-            trace_id=self._trace_client.trace_id,
-            depth=current_depth,
-            message=self._span_name,
-            created_at=start_time,
-            span_type="llm",
-            parent_span_id=self._parent_span_id_at_entry,
-        )
-        self._trace_client.add_span(span)
-        return span_id, span
-
-    def _finalize_span(self, span_id):
-        span = self._trace_client.span_id_to_span.get(span_id)
-        if span:
-            span.duration = time.time() - span.created_at
-        if span_id in self._trace_client._span_depths:
-            del self._trace_client._span_depths[span_id]
-
-
-class _TracedAsyncStreamManagerWrapper(
-    _BaseStreamManagerWrapper, AbstractAsyncContextManager
-):
-    async def __aenter__(self):
-        self._parent_span_id_at_entry = self._trace_client.get_current_span()
-        if not self._trace_client:
-            return await self._original_manager.__aenter__()
-
-        span_id, span = self._create_span()
-        self._span_context_token = self._trace_client.set_current_span(span_id)
-        span.inputs = _format_input_data(self._client, **self._input_kwargs)
-
-        # Call the original __aenter__ and expect it to be an async generator
-        raw_iterator = await self._original_manager.__aenter__()
-        span.output = "<pending stream>"
-        return self._stream_wrapper_func(
-            raw_iterator, self._client, span, self._trace_across_async_contexts
-        )
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if hasattr(self, "_span_context_token"):
-            span_id = self._trace_client.get_current_span()
-            self._finalize_span(span_id)
-            self._trace_client.reset_current_span(self._span_context_token)
-            delattr(self, "_span_context_token")
-        return await self._original_manager.__aexit__(exc_type, exc_val, exc_tb)
-
-
-class _TracedSyncStreamManagerWrapper(
-    _BaseStreamManagerWrapper, AbstractContextManager
-):
-    def __enter__(self):
-        self._parent_span_id_at_entry = self._trace_client.get_current_span()
-        if not self._trace_client:
-            return self._original_manager.__enter__()
-
-        span_id, span = self._create_span()
-        self._span_context_token = self._trace_client.set_current_span(span_id)
-        span.inputs = _format_input_data(self._client, **self._input_kwargs)
-
-        raw_iterator = self._original_manager.__enter__()
-        span.output = "<pending stream>"
-        return self._stream_wrapper_func(
-            raw_iterator, self._client, span, self._trace_across_async_contexts
-        )
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if hasattr(self, "_span_context_token"):
-            span_id = self._trace_client.get_current_span()
-            self._finalize_span(span_id)
-            self._trace_client.reset_current_span(self._span_context_token)
-            delattr(self, "_span_context_token")
-        return self._original_manager.__exit__(exc_type, exc_val, exc_tb)
 
 
 # --- Helper function for instance-prefixed qual_name ---
