@@ -224,6 +224,8 @@ def merge_results(
         elif api_scorer_data is not None and local_scorer_data is not None:
             merged_result.scorers_data = api_scorer_data + local_scorer_data
 
+        merged_result.success = merged_result.success and local_result.success
+
     return merged_results
 
 
