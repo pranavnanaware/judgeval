@@ -319,12 +319,9 @@ def check_eval_run_name_exists(
         )
 
         if response.status_code == 409:
-            judgeval_logger.error(
-                f"Eval run name '{eval_name}' already exists for this project. Please choose a different name, set the `override` flag to true, or set the `append` flag to true."
-            )
-            raise ValueError(
-                f"Eval run name '{eval_name}' already exists for this project. Please choose a different name, set the `override` flag to true, or set the `append` flag to true."
-            )
+            error_str = f"Eval run name '{eval_name}' already exists for this project. Please choose a different name, set the `override` flag to true, or set the `append` flag to true. See https://docs.judgmentlabs.ai/sdk-reference/judgment-client#override for more information."
+            judgeval_logger.error(error_str)
+            raise ValueError(error_str)
 
         if not response.ok:
             response_data = response.json()
