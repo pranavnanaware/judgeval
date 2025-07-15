@@ -861,10 +861,8 @@ def run_eval(
         check_examples(evaluation_run.examples, evaluation_run.scorers)
 
         async def _async_evaluation_workflow():
-            # Create a payload
             payload = evaluation_run.model_dump(warnings=False)
 
-            # Send the evaluation to the queue
             response = await asyncio.to_thread(
                 requests.post,
                 JUDGMENT_ADD_TO_RUN_EVAL_QUEUE_API_URL,
@@ -886,18 +884,17 @@ def run_eval(
                 )
                 raise JudgmentAPIError(error_message)
 
-            # Poll until the evaluation is complete
             results = await _poll_evaluation_until_complete(
                 eval_name=evaluation_run.eval_name,
                 project_name=evaluation_run.project_name,
                 judgment_api_key=evaluation_run.judgment_api_key,
                 organization_id=evaluation_run.organization_id,
-                original_examples=evaluation_run.examples,  # Pass the original examples
+                original_examples=evaluation_run.examples,
                 expected_scorer_count=len(evaluation_run.scorers),
             )
 
             pretty_str_to_print = None
-            if results:  # Ensure results exist before logging
+            if results:
                 send_results = [
                     scoring_result.model_dump(warnings=False)
                     for scoring_result in results
