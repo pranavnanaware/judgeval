@@ -1,5 +1,4 @@
 import pytest
-from unittest.mock import patch
 from uuid import uuid4
 from requests import Response
 
@@ -30,8 +29,7 @@ def tracer(mocker):
     mock_post = mocker.patch("judgeval.utils.requests.requests.post", autospec=True)
     mock_post.return_value = mock_post_response
 
-    with patch("judgeval.common.tracer.BackgroundSpanService"):
-        yield Tracer(api_key=str(uuid4()), organization_id="test_org")
+    yield Tracer(api_key=str(uuid4()), organization_id="test_org")
 
 
 @pytest.fixture
@@ -39,13 +37,12 @@ def trace_client(tracer):
     """Provide a trace client instance"""
     # Create a new trace client directly
     trace_id = str(uuid4())
-    with patch("judgeval.common.tracer.BackgroundSpanService"):
-        trace_client = TraceClient(
-            tracer=tracer,
-            trace_id=trace_id,
-            name="test_trace",
-            project_name="test_project",
-        )
+    trace_client = TraceClient(
+        tracer=tracer,
+        trace_id=trace_id,
+        name="test_trace",
+        project_name="test_project",
+    )
     # Set the trace context
     token = current_trace_var.set(trace_client)
 
