@@ -136,7 +136,7 @@ Run Judgment on your own infrastructure: we provide comprehensive self-hosting c
 * Access Judgment through your own custom domain
 
 ### Getting Started
-1. Check out our [self-hosting documentation](https://docs.judgmentlabs.ai/documentation/self-hosting/get_started) for detailed setup instructions, along with how your self-hosted instance can be accessed
+1. Check out our [self-hosting documentation](https://docs.judgmentlabs.ai/documentation/self-hosting/get-started) for detailed setup instructions, along with how your self-hosted instance can be accessed
 2. Use the [Judgment CLI](https://docs.judgmentlabs.ai/documentation/developer-tools/judgment-cli/installation) to deploy your self-hosted environment
 3. After your self-hosted instance is setup, make sure the `JUDGMENT_API_URL` environmental variable is set to your self-hosted backend endpoint
 
