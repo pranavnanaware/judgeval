@@ -9,8 +9,6 @@ import atexit
 import functools
 import inspect
 import os
-import site
-import sysconfig
 import threading
 import time
 import traceback
@@ -34,6 +32,7 @@ from typing import (
 )
 import types
 
+from judgeval.common.tracer.constants import _TRACE_FILEPATH_BLOCKLIST
 
 from judgeval.common.tracer.otel_span_processor import JudgmentSpanProcessor
 from judgeval.common.tracer.span_processor import SpanProcessorBase
@@ -1310,7 +1309,7 @@ class Tracer:
                             self.reset_current_trace(trace_token)
                         except Exception as e:
                             judgeval_logger.warning(f"Issue with async_wrapper: {e}")
-                            return
+                            pass
                 else:
                     with current_trace.span(span_name, span_type=span_type) as span:
                         inputs = combine_args_kwargs(func, args, kwargs)
@@ -1433,7 +1432,7 @@ class Tracer:
                             self.reset_current_trace(trace_token)
                         except Exception as e:
                             judgeval_logger.warning(f"Issue with save: {e}")
-                            return
+                            pass
                 else:
                     with current_trace.span(span_name, span_type=span_type) as span:
                         inputs = combine_args_kwargs(func, args, kwargs)
@@ -1879,25 +1878,6 @@ def combine_args_kwargs(func, args, kwargs):
     except Exception:
         # Fallback if signature inspection fails
         return {**{f"arg{i}": arg for i, arg in enumerate(args)}, **kwargs}
-
-
-# NOTE: This builds once, can be tweaked if we are missing / capturing other unncessary modules
-# @link https://docs.python.org/3.13/library/sysconfig.html
-_TRACE_FILEPATH_BLOCKLIST = tuple(
-    os.path.realpath(p) + os.sep
-    for p in {
-        sysconfig.get_paths()["stdlib"],
-        sysconfig.get_paths().get("platstdlib", ""),
-        *site.getsitepackages(),
-        site.getusersitepackages(),
-        *(
-            [os.path.join(os.path.dirname(__file__), "../../judgeval/")]
-            if os.environ.get("JUDGMENT_DEV")
-            else []
-        ),
-    }
-    if p
-)
 
 
 def cost_per_token(*args, **kwargs):

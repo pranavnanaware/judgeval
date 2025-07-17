@@ -7,8 +7,6 @@ The BatchSpanProcessor handles all batching, threading, and retry logic.
 
 from __future__ import annotations
 
-import json
-from http import HTTPStatus
 from typing import Any, Dict, List, Sequence
 
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
@@ -16,11 +14,7 @@ from opentelemetry.sdk.trace import ReadableSpan
 
 from judgeval.common.tracer.span_transformer import SpanTransformer
 from judgeval.common.logger import judgeval_logger
-from judgeval.constants import (
-    JUDGMENT_TRACES_EVALUATION_RUNS_BATCH_API_URL,
-    JUDGMENT_TRACES_SPANS_BATCH_API_URL,
-)
-from judgeval.utils.requests import requests
+from judgeval.common.api.api import JudgmentApiClient
 
 
 class JudgmentAPISpanExporter(SpanExporter):
@@ -35,18 +29,8 @@ class JudgmentAPISpanExporter(SpanExporter):
         self,
         judgment_api_key: str,
         organization_id: str,
-        spans_endpoint: str = JUDGMENT_TRACES_SPANS_BATCH_API_URL,
-        eval_runs_endpoint: str = JUDGMENT_TRACES_EVALUATION_RUNS_BATCH_API_URL,
     ):
-        self.judgment_api_key = judgment_api_key
-        self.organization_id = organization_id
-        self.spans_endpoint = spans_endpoint
-        self.eval_runs_endpoint = eval_runs_endpoint
-        self.headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {judgment_api_key}",
-            "X-Organization-Id": organization_id,
-        }
+        self.api_client = JudgmentApiClient(judgment_api_key, organization_id)
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         """
@@ -65,7 +49,7 @@ class JudgmentAPISpanExporter(SpanExporter):
             for span in spans:
                 span_data = self._convert_span_to_judgment_format(span)
 
-                if span.attributes.get("judgment.evaluation_run"):
+                if span.attributes and span.attributes.get("judgment.evaluation_run"):
                     eval_runs_data.append(span_data)
                 else:
                     spans_data.append(span_data)
@@ -91,23 +75,8 @@ class JudgmentAPISpanExporter(SpanExporter):
 
     def _send_spans_batch(self, spans: List[Dict[str, Any]]):
         """Send a batch of spans to the spans endpoint."""
-        payload = {
-            "spans": [span["data"] for span in spans],
-            "organization_id": self.organization_id,
-        }
-
-        serialized_data = json.dumps(payload, default=self._fallback_encoder)
-
-        response = requests.post(
-            self.spans_endpoint,
-            data=serialized_data,
-            headers=self.headers,
-            verify=True,
-            timeout=30,
-        )
-
-        if response.status_code != HTTPStatus.OK:
-            raise Exception(f"HTTP {response.status_code} - {response.text}")
+        spans_data = [span["data"] for span in spans]
+        self.api_client.send_spans_batch(spans_data)
 
     def _send_evaluation_runs_batch(self, eval_runs: List[Dict[str, Any]]):
         """Send a batch of evaluation runs to the evaluation runs endpoint."""
@@ -128,30 +97,7 @@ class JudgmentAPISpanExporter(SpanExporter):
             }
             evaluation_entries.append(entry)
 
-        payload = {
-            "organization_id": self.organization_id,
-            "evaluation_entries": evaluation_entries,
-        }
-
-        serialized_data = json.dumps(payload, default=self._fallback_encoder)
-
-        response = requests.post(
-            self.eval_runs_endpoint,
-            data=serialized_data,
-            headers=self.headers,
-            verify=True,
-            timeout=30,
-        )
-
-        if response.status_code != HTTPStatus.OK:
-            raise Exception(f"HTTP {response.status_code} - {response.text}")
-
-    def _fallback_encoder(self, obj: Any) -> str:
-        """Fallback encoder for JSON serialization."""
-        try:
-            return str(obj)
-        except Exception:
-            return f"<{type(obj).__name__}>"
+        self.api_client.send_evaluation_runs_batch(evaluation_entries)
 
     def shutdown(self, timeout_millis: int = 30000) -> None:
         """Shutdown the exporter."""
