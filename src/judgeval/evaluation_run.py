@@ -17,7 +17,6 @@ class EvaluationRun(BaseModel):
         scorers (List[Union[JudgmentScorer, BaseScorer]]): A list of scorers to use for evaluation
         model (str): The model used as a judge when using LLM as a Judge
         metadata (Optional[Dict[str, Any]]): Additional metadata to include for this evaluation run, e.g. comments, dataset name, purpose, etc.
-        judgment_api_key (Optional[str]): The API key for running evaluations on the Judgment API
     """
 
     organization_id: Optional[str] = None
@@ -28,7 +27,6 @@ class EvaluationRun(BaseModel):
     model: Optional[str] = "gpt-4.1"
     trace_span_id: Optional[str] = None
     # API Key will be "" until user calls client.run_eval(), then API Key will be set
-    judgment_api_key: Optional[str] = ""
     override: Optional[bool] = False
     append: Optional[bool] = False
 

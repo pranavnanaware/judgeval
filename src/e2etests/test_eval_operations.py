@@ -9,7 +9,6 @@ import time
 
 from judgeval.judgment_client import JudgmentClient
 from judgeval.data import Example
-from judgeval.scorers.example_scorer import ExampleScorer
 from judgeval.scorers import (
     FaithfulnessScorer,
     AnswerRelevancyScorer,
@@ -170,30 +169,6 @@ async def test_assert_test(client: JudgmentClient, project_name: str):
             scorers=[scorer],
             model="Qwen/Qwen2.5-72B-Instruct-Turbo",
             override=True,
-        )
-
-
-def test_assert_test_merge_results(client: JudgmentClient, project_name: str):
-    """Test assertion functionality."""
-
-    # Create examples and scorers as before
-    class AlanScorer(ExampleScorer):
-        async def a_score_example(self, example):
-            return 0
-
-    example = Example(
-        input="What if these shoes don't fit?",
-        actual_output="We offer a 30-day full refund at no extra cost.",
-    )
-
-    scorer = AlanScorer(name="Alan Scorer", model="gpt-4o-mini", threshold=0.5)
-
-    with pytest.raises(AssertionError):
-        client.assert_test(
-            examples=[example],
-            scorers=[scorer, AnswerRelevancyScorer()],
-            model="gpt-4o-mini",
-            project_name=project_name,
         )
 
 

@@ -3,9 +3,8 @@ import concurrent.futures
 import time
 import json
 import sys
-import itertools
 import threading
-from typing import List, Dict, Any, Union, Optional, Callable
+from typing import List, Dict, Union, Optional, Callable, Tuple, Any
 from rich import print as rprint
 
 from judgeval.data import ScorerData, ScoringResult, Example, Trace
@@ -95,18 +94,16 @@ def execute_api_eval(evaluation_run: EvaluationRun) -> Dict:
         )
 
 
-def execute_api_trace_eval(trace_run: TraceRun) -> Dict:
+def execute_api_trace_eval(trace_run: TraceRun, judgment_api_key: str) -> Dict:
     """
     Executes an evaluation of a list of `Trace`s using one or more `JudgmentScorer`s via the Judgment API.
     """
 
     try:
         # submit API request to execute evals
-        if not trace_run.judgment_api_key or not trace_run.organization_id:
+        if not judgment_api_key or not trace_run.organization_id:
             raise ValueError("API key and organization ID are required")
-        api_client = JudgmentApiClient(
-            trace_run.judgment_api_key, trace_run.organization_id
-        )
+        api_client = JudgmentApiClient(judgment_api_key, trace_run.organization_id)
         return api_client.run_trace_evaluation(trace_run.model_dump(warnings=False))
     except Exception as e:
         judgeval_logger.error(f"Error: {e}")
@@ -118,88 +115,6 @@ def execute_api_trace_eval(trace_run: TraceRun) -> Dict:
         raise JudgmentAPIError(
             "An error occurred while executing the Judgment API request: " + details
         )
-
-
-def merge_results(
-    api_results: List[ScoringResult], local_results: List[ScoringResult]
-) -> List[ScoringResult]:
-    """
-    When executing scorers that come from both the Judgment API and local scorers, we're left with
-    results for each type of scorer. This function merges the results from the API and local evaluations,
-    grouped by example. In particular, we merge the `scorers_data` field of each `ScoringResult` object.
-
-    Args:
-        api_results (List[ScoringResult]): The `ScoringResult`s from the API evaluation
-        local_results (List[ScoringResult]): The `ScoringResult`s from the local evaluation
-
-    Returns:
-        List[ScoringResult]: The merged `ScoringResult`s (updated `scorers_data` field)
-    """
-    # No merge required
-    if not local_results and api_results:
-        return [result.model_copy() for result in api_results]
-    if not api_results and local_results:
-        return [result.model_copy() for result in local_results]
-
-    if len(api_results) != len(local_results):
-        # Results should be of same length because each ScoringResult is a 1-1 mapping to an Example
-        raise ValueError(
-            f"The number of API and local results do not match: {len(api_results)} vs {len(local_results)}"
-        )
-
-    # Create a copy of api_results to avoid modifying the input
-    merged_results = [result.model_copy() for result in api_results]
-
-    # Each ScoringResult in api and local have all the same fields besides `scorers_data`
-    for merged_result, local_result in zip(merged_results, local_results):
-        if not (merged_result.data_object and local_result.data_object):
-            raise ValueError("Data object is None in one of the results.")
-        if merged_result.data_object.input != local_result.data_object.input:
-            raise ValueError("The API and local results are not aligned.")
-        if (
-            merged_result.data_object.actual_output
-            != local_result.data_object.actual_output
-        ):
-            raise ValueError("The API and local results are not aligned.")
-        if (
-            merged_result.data_object.expected_output
-            != local_result.data_object.expected_output
-        ):
-            raise ValueError("The API and local results are not aligned.")
-        if merged_result.data_object.context != local_result.data_object.context:
-            raise ValueError("The API and local results are not aligned.")
-        if (
-            merged_result.data_object.retrieval_context
-            != local_result.data_object.retrieval_context
-        ):
-            raise ValueError("The API and local results are not aligned.")
-        if (
-            merged_result.data_object.additional_metadata
-            != local_result.data_object.additional_metadata
-        ):
-            raise ValueError("The API and local results are not aligned.")
-        if (
-            merged_result.data_object.tools_called
-            != local_result.data_object.tools_called
-        ):
-            raise ValueError("The API and local results are not aligned.")
-        if (
-            merged_result.data_object.expected_tools
-            != local_result.data_object.expected_tools
-        ):
-            raise ValueError("The API and local results are not aligned.")
-
-        # Merge ScorerData from the API and local scorers together
-        api_scorer_data = merged_result.scorers_data
-        local_scorer_data = local_result.scorers_data
-        if api_scorer_data is None and local_scorer_data is not None:
-            merged_result.scorers_data = local_scorer_data
-        elif api_scorer_data is not None and local_scorer_data is not None:
-            merged_result.scorers_data = api_scorer_data + local_scorer_data
-
-        merged_result.success = merged_result.success and local_result.success
-
-    return merged_results
 
 
 def check_missing_scorer_data(results: List[ScoringResult]) -> List[ScoringResult]:
@@ -277,76 +192,39 @@ def check_eval_run_name_exists(
 
 
 def log_evaluation_results(
-    scoring_results: List[ScoringResult], run: Union[EvaluationRun, TraceRun]
-) -> str | None:
+    scoring_results: List[ScoringResult],
+    run: Union[EvaluationRun, TraceRun],
+    judgment_api_key: str,
+) -> str:
     """
     Logs evaluation results to the Judgment API database.
 
     Args:
-        scoring_results (List[ScoringResult]): The results to log
-        run (Union[EvaluationRun, TraceRun]): The evaluation run containing project info and API key
+        merged_results (List[ScoringResult]): The results to log
+        evaluation_run (EvaluationRun): The evaluation run containing project info and API key
+        judgment_api_key (str): The API key for the Judgment API
 
     Raises:
         JudgmentAPIError: If there's an API error during logging
         ValueError: If there's a validation error with the results
     """
     try:
-        if not run.judgment_api_key or not run.organization_id:
+        if not judgment_api_key or not run.organization_id:
             raise ValueError("API key and organization ID are required")
 
-        api_client = JudgmentApiClient(run.judgment_api_key, run.organization_id)
+        api_client = JudgmentApiClient(judgment_api_key, run.organization_id)
         response = api_client.log_evaluation_results(
             scoring_results,
             run.model_dump(warnings=False),
         )
-
-        if "ui_results_url" in response:
-            url = response["ui_results_url"]
-            pretty_str = f"\n🔍 You can view your evaluation results here: [rgb(106,0,255)][link={url}]View Results[/link]\n"
-            return pretty_str
-
-        return None
+        url = response.get("ui_results_url")
+        return url
 
     except Exception as e:
         judgeval_logger.error(f"Failed to save evaluation results to DB: {str(e)}")
         raise JudgmentAPIError(
             f"Request failed while saving evaluation results to DB: {str(e)}"
         )
-
-
-def run_with_spinner(message: str, func, *args, **kwargs) -> Any:
-    """Run a function with a spinner in the terminal."""
-    spinner = itertools.cycle(["|", "/", "-", "\\"])
-
-    def display_spinner():
-        while not stop_spinner_event.is_set():
-            sys.stdout.write(f"\r{message}{next(spinner)}")
-            sys.stdout.flush()
-            time.sleep(0.1)
-
-    stop_spinner_event = threading.Event()
-    spinner_thread = threading.Thread(target=display_spinner)
-    spinner_thread.start()
-
-    try:
-        if asyncio.iscoroutinefunction(func):
-            coro = func(*args, **kwargs)
-            result = safe_run_async(coro)
-        else:
-            result = func(*args, **kwargs)
-    except Exception as e:
-        judgeval_logger.error(f"An error occurred: {str(e)}")
-        stop_spinner_event.set()
-        spinner_thread.join()
-        raise e
-    finally:
-        stop_spinner_event.set()
-        spinner_thread.join()
-
-        sys.stdout.write("\r" + " " * (len(message) + 1) + "\r")
-        sys.stdout.flush()
-
-    return result
 
 
 def check_examples(
@@ -381,6 +259,7 @@ def check_examples(
 
 def run_trace_eval(
     trace_run: TraceRun,
+    judgment_api_key: str,
     override: bool = False,
     function: Optional[Callable] = None,
     tracer: Optional[Union[Tracer, BaseCallbackHandler]] = None,
@@ -391,7 +270,7 @@ def run_trace_eval(
         check_eval_run_name_exists(
             trace_run.eval_name,
             trace_run.project_name,
-            trace_run.judgment_api_key,
+            judgment_api_key,
             trace_run.organization_id,
         )
 
@@ -400,7 +279,7 @@ def run_trace_eval(
         check_experiment_type(
             trace_run.eval_name,
             trace_run.project_name,
-            trace_run.judgment_api_key,
+            judgment_api_key,
             trace_run.organization_id,
             True,
         )
@@ -415,22 +294,19 @@ def run_trace_eval(
 
         actual_tracer.offline_mode = True
         actual_tracer.traces = []
+        judgeval_logger.info("Running agent function: ")
         for example in examples:
             if example.input:
                 if isinstance(example.input, str):
-                    run_with_spinner(
-                        "Running agent function: ", function, example.input
-                    )
+                    function(example.input)
                 elif isinstance(example.input, dict):
-                    run_with_spinner(
-                        "Running agent function: ", function, **example.input
-                    )
+                    function(**example.input)
                 else:
                     raise ValueError(
                         f"Input must be string or dict, got {type(example.input)}"
                     )
             else:
-                run_with_spinner("Running agent function: ", function)
+                function()
 
         for i, trace in enumerate(actual_tracer.traces):
             # We set the root-level trace span with the expected tools of the Trace
@@ -442,9 +318,8 @@ def run_trace_eval(
 
     # Execute evaluation using Judgment API
     try:  # execute an EvaluationRun with just JudgmentScorers
-        response_data: Dict = run_with_spinner(
-            "Running Trace Evaluation: ", execute_api_trace_eval, trace_run
-        )
+        judgeval_logger.info("Executing Trace Evaluation... ")
+        response_data: Dict = execute_api_trace_eval(trace_run, judgment_api_key)
         scoring_results = [
             ScoringResult(**result) for result in response_data["results"]
         ]
@@ -460,14 +335,12 @@ def run_trace_eval(
     # Convert the response data to `ScoringResult` objects
     # TODO: allow for custom scorer on traces
 
-    pretty_str = run_with_spinner(
-        "Logging Results: ",
-        log_evaluation_results,
-        response_data["agent_results"],
-        trace_run,
+    url = log_evaluation_results(
+        response_data["agent_results"], trace_run, judgment_api_key
     )
-    rprint(pretty_str)
-
+    rprint(
+        f"\n🔍 You can view your evaluation results here: [rgb(106,0,255)][link={url}]View Results[/link]\n"
+    )
     return scoring_results
 
 
@@ -498,15 +371,24 @@ async def get_evaluation_status(
         )
 
 
-async def _poll_evaluation_until_complete(
+def retrieve_counts(result: Dict):
+    scorer_data_count = 0
+    for example in result.get("examples", []):
+        for scorer in example.get("scorer_data", []):
+            scorer_data_count += 1
+    return scorer_data_count
+
+
+def _poll_evaluation_until_complete(
     eval_name: str,
     project_name: str,
     judgment_api_key: str,
     organization_id: str,
-    expected_scorer_count: int,
-    original_examples: List[Example],
-    poll_interval_seconds: int = 5,
-) -> List[ScoringResult]:
+    expected_scorer_data_count: int,
+    poll_interval_seconds: float = 5,
+    max_failures: int = 5,
+    max_poll_count: int = 24,  # This should be equivalent to 120 seconds
+) -> Tuple[List[ScoringResult], str]:
     """
     Polls until the evaluation is complete and returns the results.
 
@@ -523,148 +405,93 @@ async def _poll_evaluation_until_complete(
         List[ScoringResult]: The evaluation results
     """
     poll_count = 0
+    exception_count = 0
     api_client = JudgmentApiClient(judgment_api_key, organization_id)
-    while True:
+    while poll_count < max_poll_count:
         poll_count += 1
         try:
-            status_data = await asyncio.to_thread(
-                api_client.get_evaluation_status, eval_name, project_name
+            # Check status
+            status_response = api_client.get_evaluation_status(eval_name, project_name)
+
+            if status_response.get("status") != "completed":
+                time.sleep(poll_interval_seconds)
+                continue
+
+            results_response = api_client.fetch_evaluation_results(
+                project_name, eval_name
             )
-            status = status_data.get("status")
-            if status == "completed" or status == "complete":
-                result_data = await asyncio.to_thread(
-                    api_client.fetch_evaluation_results, project_name, eval_name
+            url = results_response.get("ui_results_url")
+
+            if results_response.get("examples") is None:
+                time.sleep(poll_interval_seconds)
+                continue
+
+            examples_data = results_response.get("examples", [])
+            scoring_results = []
+            scorer_data_count = 0
+
+            for example_data in examples_data:
+                scorer_data_list = []
+                for raw_scorer_data in example_data.get("scorer_data", []):
+                    scorer_data = ScorerData(**raw_scorer_data)
+                    scorer_data_list.append(scorer_data)
+                    scorer_data_count += 1
+
+                example = Example(**example_data)
+
+                success = all(scorer_data.success for scorer_data in scorer_data_list)
+                scoring_result = ScoringResult(
+                    success=success,
+                    scorers_data=scorer_data_list,
+                    data_object=example,
                 )
-                if result_data.get("examples") is None:
-                    continue
-                examples_data = result_data.get("examples", [])
-                scoring_results = []
-                for example_data in examples_data:
-                    scorer_data_list = [
-                        ScorerData(**raw_scorer_data)
-                        for raw_scorer_data in example_data.get("scorer_data", [])
-                    ]
-                    if len(scorer_data_list) != expected_scorer_count:
-                        continue
-                    example = Example(**example_data)
-                    success = all(
-                        scorer_data.success for scorer_data in scorer_data_list
-                    )
-                    scoring_result = ScoringResult(
-                        success=success,
-                        scorers_data=scorer_data_list,
-                        data_object=example,
-                    )
-                    scoring_results.append(scoring_result)
-                    if len(scoring_results) != len(original_examples):
-                        continue
-                return scoring_results
-            elif status == "failed":
-                error_message = status_data.get("error", "Unknown error")
-                judgeval_logger.error(
-                    f"Evaluation '{eval_name}' failed: {error_message}"
-                )
-                raise JudgmentAPIError(f"Evaluation failed: {error_message}")
-            await asyncio.sleep(poll_interval_seconds)
+                scoring_results.append(scoring_result)
+
+            if scorer_data_count != expected_scorer_data_count:
+                time.sleep(poll_interval_seconds)
+                continue
+
+            return scoring_results, url
         except Exception as e:
+            exception_count += 1
             if isinstance(e, JudgmentAPIError):
                 raise
+
             judgeval_logger.error(f"Error checking evaluation status: {str(e)}")
-            if poll_count > 20:
+            if exception_count > max_failures:
                 raise JudgmentAPIError(
                     f"Error checking evaluation status after {poll_count} attempts: {str(e)}"
                 )
-            await asyncio.sleep(poll_interval_seconds)
+
+            time.sleep(poll_interval_seconds)
+
+    raise JudgmentAPIError(
+        f"Error checking evaluation status after {poll_count} attempts"
+    )
 
 
-async def await_with_spinner(task, message: str = "Awaiting async task: "):
-    """
-    Display a spinner while awaiting an async task.
-
-    Args:
-        task: The asyncio task to await
-        message (str): Message to display with the spinner
-
-    Returns:
-        Any: The result of the awaited task
-    """
-    spinner = itertools.cycle(["|", "/", "-", "\\"])
-
-    # Create an event to signal when to stop the spinner
-    stop_spinner_event = asyncio.Event()
-
-    async def display_spinner():
-        while not stop_spinner_event.is_set():
-            sys.stdout.write(f"\r{message}{next(spinner)}")
-            sys.stdout.flush()
-            await asyncio.sleep(0.1)
-
-    # Start the spinner in a separate task
-    spinner_task = asyncio.create_task(display_spinner())
-
-    try:
-        # Await the actual task
-        result = await task
-    finally:
-        # Signal the spinner to stop and wait for it to finish
-        stop_spinner_event.set()
-        await spinner_task
-
-        # Clear the spinner line
-        sys.stdout.write("\r" + " " * (len(message) + 1) + "\r")
-        sys.stdout.flush()
-
-    return result
-
-
-class SpinnerWrappedTask:
-    """
-    A wrapper for an asyncio task that displays a spinner when awaited.
-    """
-
-    def __init__(self, task, message: str):
-        self.task = task
-        self.message = message
-
-    def __await__(self):
-        async def _spin_and_await():
-            # self.task resolves to (scoring_results, pretty_str_to_print)
-            task_result_tuple = await await_with_spinner(self.task, self.message)
-
-            # Unpack the tuple
-            scoring_results, pretty_str_to_print = task_result_tuple
-
-            # Print the pretty string if it exists, after spinner is cleared
-            if pretty_str_to_print:
-                rprint(pretty_str_to_print)
-
-            # Return only the scoring_results to the original awaiter
-            return scoring_results
-
-        return _spin_and_await().__await__()
-
-    # Proxy all Task attributes and methods to the underlying task
-    def __getattr__(self, name):
-        return getattr(self.task, name)
+def progress_logger(stop_event, msg="Working...", interval=5):
+    start = time.time()
+    while not stop_event.is_set():
+        elapsed = int(time.time() - start)
+        judgeval_logger.info(f"{msg} ({elapsed} sec)")
+        stop_event.wait(interval)
 
 
 def run_eval(
     evaluation_run: EvaluationRun,
+    judgment_api_key: str,
     override: bool = False,
-    async_execution: bool = False,
-) -> Union[List[ScoringResult], asyncio.Task, SpinnerWrappedTask]:
+) -> List[ScoringResult]:
     """
     Executes an evaluation of `Example`s using one or more `Scorer`s
 
     Args:
         evaluation_run (EvaluationRun): Stores example and evaluation together for running
         override (bool, optional): Whether to override existing evaluation run with same name. Defaults to False.
-        async_execution (bool, optional): Whether to execute the evaluation asynchronously. Defaults to False.
 
     Returns:
-        Union[List[ScoringResult], Union[asyncio.Task, SpinnerWrappedTask]]:
-            - If async_execution is False, returns a list of ScoringResult objects
-            - If async_execution is True, returns a Task that will resolve to a list of ScoringResult objects when awaited
+        List[ScoringResult]: A list of ScoringResult objects
     """
 
     # Call endpoint to check to see if eval run name exists (if we DON'T want to override and DO want to log results)
@@ -672,7 +499,7 @@ def run_eval(
         check_eval_run_name_exists(
             evaluation_run.eval_name,
             evaluation_run.project_name,
-            evaluation_run.judgment_api_key,
+            judgment_api_key,
             evaluation_run.organization_id,
         )
 
@@ -681,7 +508,7 @@ def run_eval(
         check_experiment_type(
             evaluation_run.eval_name,
             evaluation_run.project_name,
-            evaluation_run.judgment_api_key,
+            judgment_api_key,
             evaluation_run.organization_id,
             False,
         )
@@ -698,123 +525,81 @@ def run_eval(
         else:
             local_scorers.append(scorer)
 
-    api_results: List[ScoringResult] = []
-    local_results: List[ScoringResult] = []
+    results: List[ScoringResult] = []
+    url = ""
 
-    if async_execution:
-        if len(local_scorers) > 0:
-            judgeval_logger.error("Local scorers are not supported in async execution")
-            raise ValueError("Local scorers are not supported in async execution")
+    if len(local_scorers) > 0 and len(judgment_scorers) > 0:
+        error_msg = "We currently do not support running both local and Judgment API scorers at the same time. Please run your evaluation with either local scorers or Judgment API scorers, but not both."
+        judgeval_logger.error(error_msg)
+        raise ValueError(error_msg)
 
-        check_examples(evaluation_run.examples, evaluation_run.scorers)
-
-        async def _async_evaluation_workflow():
-            if (
-                not evaluation_run.judgment_api_key
-                or not evaluation_run.organization_id
-            ):
-                raise ValueError("API key and organization ID are required")
-
+    if len(judgment_scorers) > 0:
+        check_examples(evaluation_run.examples, judgment_scorers)
+        stop_event = threading.Event()
+        t = threading.Thread(
+            target=progress_logger, args=(stop_event, "Running evaluation...")
+        )
+        t.start()
+        try:
             api_client = JudgmentApiClient(
-                evaluation_run.judgment_api_key, evaluation_run.organization_id
+                judgment_api_key, evaluation_run.organization_id
             )
-            await asyncio.to_thread(
-                api_client.add_to_evaluation_queue,
-                evaluation_run.model_dump(warnings=False),
+            response = api_client.add_to_evaluation_queue(
+                evaluation_run.model_dump(warnings=False)
             )
-            results = await _poll_evaluation_until_complete(
+
+            if not response.get("success", False):
+                error_message = response.error
+                judgeval_logger.error(
+                    f"Error adding evaluation to queue: {error_message}"
+                )
+                raise JudgmentAPIError(error_message)
+
+            old_scorer_data_count = 0
+            if evaluation_run.append:
+                try:
+                    results_response = api_client.fetch_evaluation_results(
+                        evaluation_run.project_name, evaluation_run.eval_name
+                    )
+                    old_scorer_data_count = retrieve_counts(results_response)
+                except Exception:
+                    # This usually means the user did append = True but the eval run name doesn't exist yet
+                    pass
+
+            results, url = _poll_evaluation_until_complete(
                 eval_name=evaluation_run.eval_name,
                 project_name=evaluation_run.project_name,
-                judgment_api_key=evaluation_run.judgment_api_key,
+                judgment_api_key=judgment_api_key,
                 organization_id=evaluation_run.organization_id,
-                original_examples=evaluation_run.examples,
-                expected_scorer_count=len(evaluation_run.scorers),
+                expected_scorer_data_count=(
+                    len(evaluation_run.scorers) * len(evaluation_run.examples)
+                )
+                + old_scorer_data_count,
             )
-            pretty_str_to_print = None
-            if results:
-                send_results = [
-                    scoring_result.model_dump(warnings=False)
-                    for scoring_result in results
-                ]
-                try:
-                    pretty_str_to_print = await asyncio.to_thread(
-                        log_evaluation_results, send_results, evaluation_run
-                    )
-                except Exception as e:
-                    judgeval_logger.error(
-                        f"Error logging results after async evaluation: {str(e)}"
-                    )
-            return results, pretty_str_to_print
+        finally:
+            stop_event.set()
+            t.join()
 
-        # Create a regular task
-        task = asyncio.create_task(_async_evaluation_workflow())
-
-        # Wrap it in our custom awaitable that will show a spinner only when awaited
-        return SpinnerWrappedTask(
-            task, f"Processing evaluation '{evaluation_run.eval_name}': "
+    if len(local_scorers) > 0:
+        results = safe_run_async(
+            a_execute_scoring(
+                evaluation_run.examples,
+                local_scorers,
+                model=evaluation_run.model,
+                throttle_value=0,
+                max_concurrent=MAX_CONCURRENT_EVALUATIONS,
+            )
         )
-    else:
-        check_examples(evaluation_run.examples, evaluation_run.scorers)
-        if judgment_scorers:
-            # Execute evaluation using Judgment API
-            try:  # execute an EvaluationRun with just JudgmentScorers
-                api_evaluation_run: EvaluationRun = EvaluationRun(
-                    eval_name=evaluation_run.eval_name,
-                    project_name=evaluation_run.project_name,
-                    examples=evaluation_run.examples,
-                    scorers=judgment_scorers,
-                    model=evaluation_run.model,
-                    judgment_api_key=evaluation_run.judgment_api_key,
-                    organization_id=evaluation_run.organization_id,
-                )
-                response_data: Dict = run_with_spinner(
-                    "Running Evaluation: ", execute_api_eval, api_evaluation_run
-                )
-            except JudgmentAPIError as e:
-                judgeval_logger.error(
-                    f"An error occurred while executing the Judgment API request: {str(e)}"
-                )
-                raise JudgmentAPIError(
-                    f"An error occurred while executing the Judgment API request: {str(e)}"
-                )
-            except ValueError as e:
-                raise ValueError(
-                    f"Please check your EvaluationRun object, one or more fields are invalid: {str(e)}"
-                )
-
-            # Convert the response data to `ScoringResult` objects
-            api_results = [
-                ScoringResult(**result) for result in response_data["results"]
-            ]
-        # Run local evals
-        if local_scorers:  # List[BaseScorer]
-            results: List[ScoringResult] = safe_run_async(
-                a_execute_scoring(
-                    evaluation_run.examples,
-                    local_scorers,
-                    model=evaluation_run.model,
-                    throttle_value=0,
-                    max_concurrent=MAX_CONCURRENT_EVALUATIONS,
-                )
-            )
-            local_results = results
-        # Aggregate the ScorerData from the API and local evaluations
-        merged_results: List[ScoringResult] = merge_results(api_results, local_results)
-        merged_results = check_missing_scorer_data(merged_results)
 
         send_results = [
-            scoring_result.model_dump(warnings=False)
-            for scoring_result in merged_results
+            scoring_result.model_dump(warnings=False) for scoring_result in results
         ]
-        pretty_str = run_with_spinner(
-            "Logging Results: ",
-            log_evaluation_results,
-            send_results,
-            evaluation_run,
-        )
-        rprint(pretty_str)
 
-        return merged_results
+        url = log_evaluation_results(send_results, evaluation_run, judgment_api_key)
+    rprint(
+        f"\n🔍 You can view your evaluation results here: [rgb(106,0,255)][link={url}]View Results[/link]\n"
+    )
+    return results
 
 
 def assert_test(scoring_results: List[ScoringResult]) -> None:

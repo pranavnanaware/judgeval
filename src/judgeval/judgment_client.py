@@ -5,7 +5,6 @@ Implements the JudgmentClient to interact with the Judgment API.
 import os
 from uuid import uuid4
 from typing import Optional, List, Dict, Any, Union, Callable
-import asyncio
 
 from judgeval.data.datasets import EvalDataset, EvalDatasetClient
 from judgeval.data import (
@@ -22,7 +21,6 @@ from judgeval.run_evaluation import (
     run_eval,
     assert_test,
     run_trace_eval,
-    safe_run_async,
 )
 from judgeval.data.trace_run import TraceRun
 from judgeval.common.api import JudgmentApiClient
@@ -31,20 +29,17 @@ from langchain_core.callbacks import BaseCallbackHandler
 from judgeval.common.tracer import Tracer
 from judgeval.common.utils import validate_api_key
 from pydantic import BaseModel
-from judgeval.run_evaluation import SpinnerWrappedTask
 from judgeval.common.logger import judgeval_logger
 
 
 class EvalRunRequestBody(BaseModel):
     eval_name: str
     project_name: str
-    judgment_api_key: str
 
 
 class DeleteEvalRunRequestBody(BaseModel):
     eval_names: List[str]
     project_name: str
-    judgment_api_key: str
 
 
 class SingletonMeta(type):
@@ -86,29 +81,6 @@ class JudgmentClient(metaclass=SingletonMeta):
         else:
             judgeval_logger.info("Successfully initialized JudgmentClient!")
 
-    def a_run_evaluation(
-        self,
-        examples: List[Example],
-        scorers: List[Union[APIScorerConfig, BaseScorer]],
-        model: Optional[str] = "gpt-4.1",
-        project_name: str = "default_project",
-        eval_run_name: str = "default_eval_run",
-        override: bool = False,
-        append: bool = False,
-    ) -> List[ScoringResult]:
-        result = self.run_evaluation(
-            examples=examples,
-            scorers=scorers,
-            model=model,
-            project_name=project_name,
-            eval_run_name=eval_run_name,
-            override=override,
-            append=append,
-            async_execution=True,
-        )
-        assert not isinstance(result, (asyncio.Task, SpinnerWrappedTask))
-        return result
-
     def run_trace_evaluation(
         self,
         scorers: List[Union[APIScorerConfig, BaseScorer]],
@@ -140,11 +112,12 @@ class JudgmentClient(metaclass=SingletonMeta):
                 scorers=scorers,
                 model=model,
                 append=append,
-                judgment_api_key=self.judgment_api_key,
                 organization_id=self.organization_id,
                 tools=tools,
             )
-            return run_trace_eval(trace_run, override, function, tracer, examples)
+            return run_trace_eval(
+                trace_run, self.judgment_api_key, override, function, tracer, examples
+            )
         except ValueError as e:
             raise ValueError(
                 f"Please check your TraceRun object, one or more fields are invalid: \n{str(e)}"
@@ -161,8 +134,7 @@ class JudgmentClient(metaclass=SingletonMeta):
         eval_run_name: str = "default_eval_run",
         override: bool = False,
         append: bool = False,
-        async_execution: bool = False,
-    ) -> Union[List[ScoringResult], asyncio.Task | SpinnerWrappedTask]:
+    ) -> List[ScoringResult]:
         """
         Executes an evaluation of `Example`s using one or more `Scorer`s
 
@@ -174,7 +146,6 @@ class JudgmentClient(metaclass=SingletonMeta):
             eval_run_name (str): A name for this evaluation run
             override (bool): Whether to override an existing evaluation run with the same name
             append (bool): Whether to append to an existing evaluation run with the same name
-            async_execution (bool): Whether to execute the evaluation asynchronously
 
         Returns:
             List[ScoringResult]: The results of the evaluation
@@ -187,18 +158,18 @@ class JudgmentClient(metaclass=SingletonMeta):
         try:
             eval = EvaluationRun(
                 append=append,
+                override=override,
                 project_name=project_name,
                 eval_name=eval_run_name,
                 examples=examples,
                 scorers=scorers,
                 model=model,
-                judgment_api_key=self.judgment_api_key,
                 organization_id=self.organization_id,
             )
             return run_eval(
                 eval,
+                self.judgment_api_key,
                 override,
-                async_execution=async_execution,
             )
         except ValueError as e:
             raise ValueError(
@@ -310,7 +281,6 @@ class JudgmentClient(metaclass=SingletonMeta):
         eval_run_name: str = str(uuid4()),
         override: bool = False,
         append: bool = False,
-        async_execution: bool = False,
     ) -> None:
         """
         Asserts a test by running the evaluation and checking the results for success
@@ -326,7 +296,7 @@ class JudgmentClient(metaclass=SingletonMeta):
             async_execution (bool): Whether to run the evaluation asynchronously
         """
 
-        results: Union[List[ScoringResult], asyncio.Task | SpinnerWrappedTask]
+        results: List[ScoringResult]
 
         results = self.run_evaluation(
             examples=examples,
@@ -336,18 +306,8 @@ class JudgmentClient(metaclass=SingletonMeta):
             eval_run_name=eval_run_name,
             override=override,
             append=append,
-            async_execution=async_execution,
         )
-
-        if async_execution and isinstance(results, (asyncio.Task, SpinnerWrappedTask)):
-
-            async def run_async():
-                return await results
-
-            actual_results = safe_run_async(run_async())
-            assert_test(actual_results)
-        else:
-            assert_test(results)
+        assert_test(results)
 
     def assert_trace_test(
         self,
@@ -390,7 +350,7 @@ class JudgmentClient(metaclass=SingletonMeta):
                             f"You must provide the 'tools' argument to assert_test when using a scorer with enable_param_checking=True. If you do not want to do param checking, explicitly set enable_param_checking=False for the {scorer.__name__} scorer."
                         )
 
-        results: Union[List[ScoringResult], asyncio.Task | SpinnerWrappedTask]
+        results: List[ScoringResult]
 
         results = self.run_trace_evaluation(
             examples=examples,
@@ -406,12 +366,4 @@ class JudgmentClient(metaclass=SingletonMeta):
             tools=tools,
         )
 
-        if async_execution and isinstance(results, (asyncio.Task, SpinnerWrappedTask)):
-
-            async def run_async():
-                return await results
-
-            actual_results = safe_run_async(run_async())
-            assert_test(actual_results)
-        else:
-            assert_test(results)
+        assert_test(results)

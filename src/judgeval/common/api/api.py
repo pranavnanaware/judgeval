@@ -179,7 +179,6 @@ class JudgmentApiClient:
         payload: EvalRunRequestBody = {
             "project_name": project_name,
             "eval_name": eval_name,
-            "judgment_api_key": self.api_key,
         }
         return self._do_request("POST", JUDGMENT_EVAL_FETCH_API_URL, payload)
 
