@@ -8,6 +8,7 @@ from judgeval.data.judgment_types import (
     TraceSpanJudgmentType,
     TraceJudgmentType,
 )
+from judgeval.constants import SPAN_LIFECYCLE_END_UPDATE_ID
 from pydantic import BaseModel
 
 
@@ -55,6 +56,22 @@ class TraceSpan(TraceSpanJudgmentType):
             self.update_id += 1
             return self.update_id
 
+    def set_update_id_to_ending_number(
+        self, ending_number: int = SPAN_LIFECYCLE_END_UPDATE_ID
+    ) -> int:
+        """
+        Thread-safe method to set the update_id to a predetermined ending number.
+
+        Args:
+            ending_number (int): The number to set update_id to. Defaults to SPAN_LIFECYCLE_END_UPDATE_ID.
+
+        Returns:
+            int: The new update_id value after setting
+        """
+        with self._update_id_lock:
+            self.update_id = ending_number
+            return self.update_id
+
     def print_span(self):
         """Print the span with proper formatting and parent relationship information."""
         indent = "  " * self.depth
@@ -73,8 +90,56 @@ class TraceSpan(TraceSpanJudgmentType):
 
     def safe_stringify(self, output, function_name):
         """
-        Safely converts an object to a string or repr, handling serialization issues gracefully.
+        Safely converts an object to a JSON-serializable structure, handling common object types intelligently.
         """
+        # Handle Pydantic models
+        if hasattr(output, "model_dump"):
+            try:
+                return output.model_dump()
+            except Exception:
+                pass
+
+        # Handle LangChain messages and similar objects with content/type
+        if hasattr(output, "content") and hasattr(output, "type"):
+            try:
+                result = {"type": output.type, "content": output.content}
+                # Add additional fields if they exist
+                if hasattr(output, "additional_kwargs"):
+                    result["additional_kwargs"] = output.additional_kwargs
+                if hasattr(output, "response_metadata"):
+                    result["response_metadata"] = output.response_metadata
+                if hasattr(output, "name"):
+                    result["name"] = output.name
+                return result
+            except Exception:
+                pass
+
+        if hasattr(output, "dict"):
+            try:
+                return output.dict()
+            except Exception:
+                pass
+
+        if hasattr(output, "to_dict"):
+            try:
+                return output.to_dict()
+            except Exception:
+                pass
+
+        if hasattr(output, "__dataclass_fields__"):
+            try:
+                import dataclasses
+
+                return dataclasses.asdict(output)
+            except Exception:
+                pass
+
+        if hasattr(output, "__dict__"):
+            try:
+                return output.__dict__
+            except Exception:
+                pass
+
         try:
             return str(output)
         except (TypeError, OverflowError, ValueError):

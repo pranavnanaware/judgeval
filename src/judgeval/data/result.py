@@ -30,7 +30,7 @@ class ScoringResult(ScoringResultJudgmentType):
     def __str__(self) -> str:
         return f"ScoringResult(\
             success={self.success}, \
-            scorer_data={self.scorers_data}, \
+            scorers_data={self.scorers_data}, \
             data_object={self.data_object}, \
             run_duration={self.run_duration})"
 

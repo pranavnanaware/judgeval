@@ -10,7 +10,6 @@ from pydantic import BaseModel
 from judgeval.judges.utils import create_judge
 from typing import Any
 from pydantic import model_validator, Field
-from judgeval.common.logger import judgeval_logger
 
 
 class BaseScorer(BaseModel):
@@ -32,10 +31,10 @@ class BaseScorer(BaseModel):
     reason: Optional[str] = ""
     using_native_model: Optional[bool] = None  # Whether the model is a native model
     success: Optional[bool] = None  # Whether the test case passed or failed
-    model: Optional[Any] = Field(
+    model: Optional[str] = None  # The name of the model used to evaluate the test case
+    model_client: Optional[Any] = Field(
         default=None, exclude=True
     )  # The model used to evaluate the test case
-    evaluation_model: Optional[str] = None  # The model used to evaluate the test case
     strict_mode: bool = False  # Whether to run the scorer in strict mode
     error: Optional[str] = None  # The error message if the scorer failed
     additional_metadata: Optional[Dict] = None  # Additional metadata for the scorer
@@ -66,8 +65,8 @@ class BaseScorer(BaseModel):
 
         This method is used at eval time
         """
-        self.model, self.using_native_model = create_judge(model)
-        self.evaluation_model = self.model.get_model_name()
+        self.model_client, self.using_native_model = create_judge(model)
+        self.model = self.model_client.get_model_name() or model
 
     def success_check(self) -> bool:
         """
@@ -78,21 +77,3 @@ class BaseScorer(BaseModel):
         if self.score is None:
             return False
         return self.score >= self.threshold
-
-    def __str__(self):
-        if self.error:
-            judgeval_logger.warning(f"BaseScorer contains error: {self.error}")
-        attributes = {
-            "score_type": self.score_type,
-            "threshold": self.threshold,
-            "score": self.score,
-            "score_breakdown": self.score_breakdown,
-            "reason": self.reason,
-            "success": self.success,
-            "model": self.model,
-            "evaluation_model": self.evaluation_model,
-            "strict_mode": self.strict_mode,
-            "error": self.error,
-            "additional_metadata": self.additional_metadata,
-        }
-        return f"BaseScorer({attributes})"
