@@ -292,6 +292,13 @@ def run_trace_eval(
             # This is a callback handler, get the underlying tracer
             actual_tracer = tracer.tracer
 
+        if trace_run.project_name != actual_tracer.project_name:
+            raise ValueError(
+                f"Project name mismatch between run_trace_eval and tracer. "
+                f"Trace run: {trace_run.project_name}, "
+                f"Tracer: {actual_tracer.project_name}"
+            )
+
         actual_tracer.offline_mode = True
         actual_tracer.traces = []
         judgeval_logger.info("Running agent function: ")
