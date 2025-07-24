@@ -3,9 +3,6 @@ Tests for evaluation operations in the JudgmentClient.
 """
 
 import pytest
-import os
-import tempfile
-import time
 
 from judgeval.judgment_client import JudgmentClient
 from judgeval.data import Example
@@ -16,7 +13,6 @@ from judgeval.scorers import (
 )
 from judgeval.data.datasets.dataset import EvalDataset
 from judgeval.tracer import Tracer
-from judgeval.utils.file_utils import get_examples_from_yaml
 
 
 def run_eval_helper(client: JudgmentClient, project_name: str, eval_run_name: str):
@@ -205,69 +201,75 @@ def test_evaluate_dataset(client: JudgmentClient, project_name: str):
 
 
 @pytest.mark.asyncio
-async def test_run_trace_eval_from_yaml(
+async def test_run_trace_eval(
     client: JudgmentClient, project_name: str, random_name: str
 ):
-    """Test run_trace_evaluation with a YAML configuration file."""
     EVAL_RUN_NAME = random_name
-
-    yaml_content = """
-examples:
-  - input: "hello from yaml"
-    expected_tools:
-      - tool_name: "simple_traced_function_for_yaml_eval"
-        agent_name: "Agent 1"
-        parameters:
-          text: "hello from yaml"
-    retrieval_context:
-      - "Context for hello from yaml"
-  - input: "another yaml test"
-    expected_tools:
-      - tool_name: "simple_traced_function_for_yaml_eval"
-        agent_name: "Agent 1"
-    retrieval_context:
-      - "Context for another yaml test"
-"""
     tracer = Tracer(project_name=project_name)
 
     @tracer.observe(span_type="tool")
-    def simple_traced_function_for_yaml_eval(text: str):
-        """A simple function to be traced and evaluated from YAML."""
-        time.sleep(0.01)  # Simulate minimal sync work
+    def simple_function(text: str):
+        return "finished {text}"
+
+    example1 = Example(
+        input="input",
+        expected_tools=[
+            {"tool_name": "simple_function", "parameters": {"text": "input"}}
+        ],
+    )
+
+    example2 = Example(
+        input="input2",
+        expected_tools=[
+            {"tool_name": "simple_function", "parameters": {"text": "input2"}}
+        ],
+    )
+
+    scorer = ToolOrderScorer(threshold=0.5)
+    results = client.run_trace_evaluation(
+        examples=[example1, example2],
+        function=simple_function,
+        tracer=tracer,
+        scorers=[scorer],
+        project_name=project_name,
+        eval_run_name=EVAL_RUN_NAME,
+        override=True,
+    )
+    assert results, (
+        f"No evaluation results found for {EVAL_RUN_NAME} in project {project_name}"
+    )
+    assert len(results) == 2, f"Expected 2 trace results but got {len(results)}"
+
+    assert results[0].success
+    assert results[1].success
+
+
+@pytest.mark.asyncio
+async def test_run_trace_eval_with_project_mismatch(
+    client: JudgmentClient, project_name: str, random_name: str
+):
+    EVAL_RUN_NAME = random_name
+
+    tracer = Tracer(project_name="mismatching-project")
+    scorer = ToolOrderScorer(threshold=0.5)
+    example = Example(input="hello")
+
+    @tracer.observe(span_type="tool")
+    def simple_function(text: str):
         return f"Processed: {text.upper()}"
 
-    temp_yaml_file_path = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", delete=False, suffix=".yaml"
-        ) as tmpfile:
-            tmpfile.write(yaml_content)
-            temp_yaml_file_path = tmpfile.name
-        scorer = ToolOrderScorer(threshold=0.5)
+    with pytest.raises(
+        ValueError, match="Project name mismatch between run_trace_eval and tracer."
+    ):
         client.run_trace_evaluation(
-            examples=get_examples_from_yaml(temp_yaml_file_path),
-            function=simple_traced_function_for_yaml_eval,
+            examples=[example],
+            function=simple_function,
             tracer=tracer,
             scorers=[scorer],
             project_name=project_name,
             eval_run_name=EVAL_RUN_NAME,
             override=True,
         )
-
-        results = client.pull_eval(
-            project_name=project_name, eval_run_name=EVAL_RUN_NAME
-        )
-        assert results, (
-            f"No evaluation results found for {EVAL_RUN_NAME} in project {project_name}"
-        )
-        assert isinstance(results, list), (
-            "Expected results to be a list of experiment/trace data"
-        )
-        assert len(results) == 2, f"Expected 2 trace results but got {len(results)}"
-
-    finally:
-        if temp_yaml_file_path and os.path.exists(temp_yaml_file_path):
-            os.remove(temp_yaml_file_path)
 
 
 def test_override_eval(client: JudgmentClient, project_name: str, random_name: str):
