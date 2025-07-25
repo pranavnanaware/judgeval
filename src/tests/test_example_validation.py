@@ -55,8 +55,16 @@ class TestExampleValidation:
         assert example.actual_output == "response"
         assert example.expected_output == "expected response"
         assert example.context == ["context1", "context2"]
-        assert example.name == "test example"
+        assert example.retrieval_context == ["retrieval1"]
         assert example.additional_metadata == {"key": "value"}
+        assert example.tools_called == ["tool1"]
+        assert example.name == "test example"
+        assert example.example_index == 1
+        assert example.trace_id == "trace123"
+        assert example.trace_span_id == "span123"
+        assert example.dataset_id == "dataset123"
+        # The __init__ method resets example_id to None. This assertion captures the current behavior.
+        assert example.example_id is None
 
     def test_mixed_valid_and_invalid_keys_raise_error(self):
         """Test that having both valid and invalid keys still raises an error."""
