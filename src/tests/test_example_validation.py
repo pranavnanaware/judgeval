@@ -72,27 +72,30 @@ class TestExampleValidation:
         assert "Extra inputs are not permitted" in str(error)
         assert "invalid_key" in str(error)
 
-    def test_typo_in_field_name_raises_error(self):
+    @pytest.mark.parametrize(
+        "invalid_field_kwargs",
+        [
+            pytest.param({"inptu": "test"}, id="typo_in_input"),
+            pytest.param({"actual_outpu": "test"}, id="typo_in_actual_output"),
+            pytest.param({"expected_outpu": "test"}, id="typo_in_expected_output"),
+        ],
+    )
+    def test_typo_in_field_name_raises_error(self, invalid_field_kwargs):
         """Test that common typos in field names are caught."""
-        # Test typo in 'input'
         with pytest.raises(ValidationError):
-            Example(inptu='test')  # typo: inptu instead of input
-        
-        # Test typo in 'actual_output'
-        with pytest.raises(ValidationError):
-            Example(actual_outpu='test')  # typo: actual_outpu instead of actual_output
-        
-        # Test typo in 'expected_output'
-        with pytest.raises(ValidationError):
-            Example(expected_outpu='test')  # typo: expected_outpu instead of expected_output
+            Example(**invalid_field_kwargs)
 
-    def test_case_sensitive_field_names(self):
+    @pytest.mark.parametrize(
+        "invalid_field_kwargs",
+        [
+            pytest.param({"Input": "test"}, id="wrong_case_input"),
+            pytest.param({"ACTUAL_OUTPUT": "test"}, id="wrong_case_actual_output"),
+        ],
+    )
+    def test_case_sensitive_field_names(self, invalid_field_kwargs):
         """Test that field names are case sensitive."""
         with pytest.raises(ValidationError):
-            Example(Input='test')  # wrong case: Input instead of input
-        
-        with pytest.raises(ValidationError):
-            Example(ACTUAL_OUTPUT='test')  # wrong case: ACTUAL_OUTPUT instead of actual_output
+            Example(**invalid_field_kwargs)
 
     def test_empty_example_creation(self):
         """Test that an empty Example can be created without any fields."""
